@@ -1,9 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { analyzeVideo, resolveDuration, type AnalyzeProgress } from "@/lib/analyzeVideo";
-import { drawSkeleton } from "@/lib/drawing";
-import { bodyConfidence, kneeAngle } from "@/lib/geometry";
+import { drawSkeleton, type JointMarker } from "@/lib/drawing";
+import { landmarksAt, nearestFrameIndex } from "@/lib/frames";
+import {
+  computeSprintMetrics,
+  JOINT_LABELS,
+  JOINT_MARKER_LANDMARKS,
+  scoreColor,
+  type ScoredJoint,
+} from "@/lib/metrics";
 import type { PoseAnalysis } from "@/lib/types";
 
 interface Props {
@@ -13,27 +20,29 @@ interface Props {
 
 type Phase = "analyzing" | "ready" | "error";
 
+const ALL_JOINTS = Object.keys(JOINT_MARKER_LANDMARKS) as ScoredJoint[];
+
 export default function VideoAnalysis({ videoUrl, onBack }: Props) {
   const [phase, setPhase] = useState<Phase>("analyzing");
   const [progress, setProgress] = useState<AnalyzeProgress | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const [analysis, setAnalysis] = useState<PoseAnalysis | null>(null);
   const [playing, setPlaying] = useState(false);
+  const [selectedJoint, setSelectedJoint] = useState<ScoredJoint | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const analysisVideoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const sliderRef = useRef<HTMLInputElement>(null);
   const scrubbingRef = useRef(false);
-  const lastDrawnFrameRef = useRef(-1);
+  const selectedJointRef = useRef<ScoredJoint | null>(null);
+  const feedbackRef = useRef<HTMLSpanElement>(null);
+  const feedbackDotRef = useRef<HTMLSpanElement>(null);
 
-  // Debug panel values are written straight into the DOM (no re-render per frame).
-  const debugTimeRef = useRef<HTMLSpanElement>(null);
-  const debugFrameRef = useRef<HTMLSpanElement>(null);
-  const debugDetectedRef = useRef<HTMLSpanElement>(null);
-  const debugConfRef = useRef<HTMLSpanElement>(null);
-  const debugKneeLRef = useRef<HTMLSpanElement>(null);
-  const debugKneeRRef = useRef<HTMLSpanElement>(null);
+  const metrics = useMemo(
+    () => (analysis ? computeSprintMetrics(analysis) : null),
+    [analysis],
+  );
 
   // --- Analysis pass: run the whole video through the landmarker once. ---
   useEffect(() => {
@@ -43,6 +52,7 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
     setPhase("analyzing");
     setProgress(null);
     setAnalysis(null);
+    setSelectedJoint(null);
     analyzeVideo(video, setProgress, controller.signal)
       .then((result) => {
         setAnalysis(result);
@@ -58,62 +68,53 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
     return () => controller.abort();
   }, [videoUrl]);
 
-  // Frames come from real presented video frames, so they are not uniformly
-  // spaced — binary-search the nearest cached frame.
-  const frameIndexAt = useCallback(
-    (timeSec: number): number => {
-      if (!analysis || analysis.frames.length === 0) return -1;
-      const frames = analysis.frames;
-      let lo = 0;
-      let hi = frames.length - 1;
-      while (lo < hi) {
-        const mid = (lo + hi) >> 1;
-        if (frames[mid].timeSec < timeSec) lo = mid + 1;
-        else hi = mid;
-      }
-      if (lo > 0 && timeSec - frames[lo - 1].timeSec < frames[lo].timeSec - timeSec) {
-        return lo - 1;
-      }
-      return lo;
-    },
-    [analysis],
-  );
-
   const drawAt = useCallback(
-    (timeSec: number, force = false) => {
+    (timeSec: number) => {
       const canvas = canvasRef.current;
-      if (!canvas || !analysis) return;
-      const idx = frameIndexAt(timeSec);
-      if (idx < 0) return;
-      if (!force && idx === lastDrawnFrameRef.current) return;
-      lastDrawnFrameRef.current = idx;
-
+      if (!canvas || !analysis || !metrics) return;
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
-      const frame = analysis.frames[idx];
-      drawSkeleton(ctx, frame.landmarks);
-      updateDebug(timeSec, idx);
+
+      const landmarks = landmarksAt(analysis, timeSec);
+      const idx = nearestFrameIndex(analysis, timeSec);
+      const assessments = idx >= 0 ? metrics.perFrame[idx] : {};
+
+      const markers: JointMarker[] = [];
+      for (const joint of ALL_JOINTS) {
+        const assessment = assessments[joint];
+        if (!assessment) continue;
+        for (const landmarkIndex of JOINT_MARKER_LANDMARKS[joint]) {
+          markers.push({
+            landmarkIndex,
+            color: scoreColor(assessment.score),
+            selected: selectedJointRef.current === joint,
+          });
+        }
+      }
+      drawSkeleton(ctx, landmarks, markers);
+
+      const selected = selectedJointRef.current;
+      if (selected && feedbackRef.current && feedbackDotRef.current) {
+        const assessment = assessments[selected];
+        if (assessment) {
+          feedbackRef.current.textContent = assessment.feedback;
+          feedbackDotRef.current.style.backgroundColor = scoreColor(assessment.score);
+        } else {
+          feedbackRef.current.textContent = "Für diesen Moment keine verlässlichen Daten.";
+          feedbackDotRef.current.style.backgroundColor = "#5f6368";
+        }
+      }
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [analysis, frameIndexAt],
+    [analysis, metrics],
   );
 
-  function updateDebug(timeSec: number, idx: number) {
-    if (!analysis) return;
-    const frame = analysis.frames[idx];
-    const lm = frame.landmarks;
-    setText(debugTimeRef, `${timeSec.toFixed(2)} s`);
-    setText(debugFrameRef, `${idx + 1} / ${analysis.frames.length}`);
-    setText(debugDetectedRef, lm ? "ja" : "nein");
-    const conf = lm ? bodyConfidence(lm) : null;
-    setText(debugConfRef, conf !== null ? `${(conf * 100).toFixed(0)} %` : "–");
-    const left = lm ? kneeAngle(lm, "left") : null;
-    const right = lm ? kneeAngle(lm, "right") : null;
-    setText(debugKneeLRef, left !== null ? `${left.toFixed(1)}°` : "–");
-    setText(debugKneeRRef, right !== null ? `${right.toFixed(1)}°` : "–");
-  }
+  useEffect(() => {
+    selectedJointRef.current = selectedJoint;
+    const video = videoRef.current;
+    if (video) drawAt(video.currentTime);
+  }, [selectedJoint, drawAt]);
 
-  // --- Playback loop: keep overlay, slider and debug panel in sync. ---
+  // --- Playback loop: keep overlay and slider in sync. ---
   useEffect(() => {
     if (phase !== "ready" || !analysis) return;
     const video = videoRef.current;
@@ -122,7 +123,6 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
 
     canvas.width = analysis.videoWidth;
     canvas.height = analysis.videoHeight;
-    lastDrawnFrameRef.current = -1;
 
     // The sync loop stays off until priming is done, so the duration fix
     // can't fight with (or overwrite) an early user seek.
@@ -140,14 +140,12 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
       } catch {
         // durationSec from the analysis pass is the fallback source of truth.
       }
-      // resolveDuration resets currentTime to 0 — restore any seek the user
-      // already made while the duration was being resolved.
       const sliderTime = parseFloat(sliderRef.current?.value ?? "0");
       if (sliderTime > 0 && Math.abs(video.currentTime - sliderTime) > 0.01) {
         video.currentTime = sliderTime;
       }
       primed = true;
-      drawAt(video.currentTime, true);
+      drawAt(video.currentTime);
     };
     void prime();
 
@@ -188,7 +186,7 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
     const clamped = Math.min(Math.max(timeSec, 0), analysis.durationSec);
     video.currentTime = clamped;
     // Draw from cache immediately — no waiting for the browser to finish seeking.
-    drawAt(clamped, true);
+    drawAt(clamped);
     if (sliderRef.current) sliderRef.current.value = String(clamped);
   };
 
@@ -196,9 +194,55 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
     const video = videoRef.current;
     if (!video || !analysis) return;
     video.pause();
-    const idx = frameIndexAt(video.currentTime);
+    const idx = nearestFrameIndex(analysis, video.currentTime);
     const next = Math.min(Math.max(idx + direction, 0), analysis.frames.length - 1);
     seekTo(analysis.frames[next].timeSec);
+  };
+
+  const jumpToEvent = (timeSec: number) => {
+    videoRef.current?.pause();
+    seekTo(timeSec);
+  };
+
+  /** Tap on a colored joint selects it; tapping elsewhere toggles play. */
+  const onCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    const video = videoRef.current;
+    if (!canvas || !video || !analysis || !metrics) {
+      togglePlay();
+      return;
+    }
+    const rect = canvas.getBoundingClientRect();
+    const px = (e.clientX - rect.left) / rect.width;
+    const py = (e.clientY - rect.top) / rect.height;
+    const landmarks = landmarksAt(analysis, video.currentTime);
+    const idx = nearestFrameIndex(analysis, video.currentTime);
+    const assessments = idx >= 0 ? metrics.perFrame[idx] : {};
+
+    let bestJoint: ScoredJoint | null = null;
+    let bestDist = Infinity;
+    if (landmarks) {
+      for (const joint of ALL_JOINTS) {
+        if (!assessments[joint]) continue;
+        for (const landmarkIndex of JOINT_MARKER_LANDMARKS[joint]) {
+          const lm = landmarks[landmarkIndex];
+          if (!lm) continue;
+          const dist = Math.hypot(
+            (lm.x - px) * rect.width,
+            (lm.y - py) * rect.height,
+          );
+          if (dist < bestDist) {
+            bestDist = dist;
+            bestJoint = joint;
+          }
+        }
+      }
+    }
+    if (bestJoint && bestDist <= 32) {
+      setSelectedJoint((prev) => (prev === bestJoint ? null : bestJoint));
+    } else {
+      togglePlay();
+    }
   };
 
   if (phase === "error") {
@@ -210,7 +254,7 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
     );
   }
 
-  if (phase === "analyzing" || !analysis) {
+  if (phase === "analyzing" || !analysis || !metrics) {
     const percent = progress
       ? Math.min(100, Math.round((progress.processedSec / progress.totalSec) * 100))
       : 0;
@@ -275,19 +319,34 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
   const aspect = analysis.videoWidth / analysis.videoHeight;
 
   return (
-    <main style={{ display: "flex", flexDirection: "column", gap: 12, padding: 16 }}>
+    <main style={{ display: "flex", flexDirection: "column", gap: 10, padding: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <button onClick={onBack}>‹ Neues Video</button>
         <span style={{ color: "#9aa0a6", fontSize: 13 }}>
-          {analysis.videoWidth}×{analysis.videoHeight} · {analysis.frames.length} Frames analysiert
+          Sprint · {analysis.frames.length} Frames
         </span>
       </div>
+
+      {(metrics.cadenceStepsPerSec !== null || metrics.meanTorsoLeanDeg !== null) && (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {metrics.cadenceStepsPerSec !== null && (
+            <span style={statChipStyle}>
+              Kadenz ≈ {metrics.cadenceStepsPerSec.toFixed(1)} Schritte/s
+            </span>
+          )}
+          {metrics.meanTorsoLeanDeg !== null && (
+            <span style={statChipStyle}>
+              Ø Vorlage {metrics.meanTorsoLeanDeg.toFixed(0)}°
+            </span>
+          )}
+        </div>
+      )}
 
       <div
         style={{
           position: "relative",
           width: "100%",
-          maxWidth: `calc(60dvh * ${aspect})`,
+          maxWidth: `calc(55dvh * ${aspect})`,
           aspectRatio: `${analysis.videoWidth} / ${analysis.videoHeight}`,
           margin: "0 auto",
           background: "#000",
@@ -301,20 +360,48 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
           muted
           playsInline
           preload="auto"
-          onClick={togglePlay}
           style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
         />
         <canvas
           ref={canvasRef}
+          onClick={onCanvasClick}
           style={{
             position: "absolute",
             inset: 0,
             width: "100%",
             height: "100%",
-            pointerEvents: "none",
+            cursor: "pointer",
           }}
         />
       </div>
+
+      {metrics.events.length > 0 && (
+        <div
+          style={{
+            display: "flex",
+            gap: 6,
+            overflowX: "auto",
+            paddingBottom: 4,
+            WebkitOverflowScrolling: "touch",
+          }}
+        >
+          {metrics.events.map((event, i) => (
+            <button
+              key={i}
+              onClick={() => jumpToEvent(event.timeSec)}
+              style={{
+                padding: "6px 10px",
+                fontSize: 12,
+                whiteSpace: "nowrap",
+                borderRadius: 999,
+                flexShrink: 0,
+              }}
+            >
+              {event.kind === "contact" ? "👣" : "🦵"} {event.label} · {event.timeSec.toFixed(2)}s
+            </button>
+          ))}
+        </div>
+      )}
 
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         <button onClick={() => stepFrame(-1)} aria-label="Frame zurück">⏮</button>
@@ -347,25 +434,54 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
           border: "1px solid #2a2f3a",
           borderRadius: 8,
           padding: 12,
-          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-          fontSize: 13,
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr",
-          gap: 6,
+          fontSize: 14,
+          lineHeight: 1.5,
+          minHeight: 66,
         }}
       >
-        <span style={{ gridColumn: "1 / -1", color: "#9aa0a6" }}>Debug-Panel</span>
-        <span>Zeit: <span ref={debugTimeRef}>–</span></span>
-        <span>Frame: <span ref={debugFrameRef}>–</span></span>
-        <span>Pose erkannt: <span ref={debugDetectedRef}>–</span></span>
-        <span>Confidence: <span ref={debugConfRef}>–</span></span>
-        <span>Kniewinkel links: <span ref={debugKneeLRef}>–</span></span>
-        <span>Kniewinkel rechts: <span ref={debugKneeRRef}>–</span></span>
+        {selectedJoint ? (
+          <>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+              <span
+                ref={feedbackDotRef}
+                style={{
+                  width: 12,
+                  height: 12,
+                  borderRadius: "50%",
+                  display: "inline-block",
+                  backgroundColor: "#5f6368",
+                  flexShrink: 0,
+                }}
+              />
+              <strong>{JOINT_LABELS[selectedJoint]}</strong>
+              <button
+                onClick={() => setSelectedJoint(null)}
+                style={{ marginLeft: "auto", padding: "2px 10px", fontSize: 12 }}
+              >
+                ✕
+              </button>
+            </div>
+            <span ref={feedbackRef} style={{ color: "#c6cad2" }} />
+          </>
+        ) : (
+          <span style={{ color: "#9aa0a6" }}>
+            Tippe einen farbigen Punkt im Video an, um Winkel &amp; Feedback zu sehen.
+            <br />
+            <span style={{ fontSize: 12 }}>
+              🟢 gut · 🟡 okay · 🟠 verbesserungswürdig · 🔴 fehlerhaft
+            </span>
+          </span>
+        )}
       </section>
     </main>
   );
 }
 
-function setText(ref: React.RefObject<HTMLSpanElement | null>, text: string) {
-  if (ref.current) ref.current.textContent = text;
-}
+const statChipStyle: React.CSSProperties = {
+  background: "#1a1d24",
+  border: "1px solid #2a2f3a",
+  borderRadius: 999,
+  padding: "4px 12px",
+  fontSize: 13,
+  color: "#c6cad2",
+};

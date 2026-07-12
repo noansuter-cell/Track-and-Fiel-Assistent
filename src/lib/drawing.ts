@@ -56,10 +56,18 @@ function isDrawable(lm: NormalizedLandmark | undefined): lm is NormalizedLandmar
   return lm.visibility === undefined || lm.visibility >= MIN_VISIBILITY;
 }
 
+/** A colored, tappable marker on top of a landmark (scored joint). */
+export interface JointMarker {
+  landmarkIndex: number;
+  color: string;
+  selected: boolean;
+}
+
 /** Draw the skeleton for one frame. Canvas pixel size must match the video frame size. */
 export function drawSkeleton(
   ctx: CanvasRenderingContext2D,
   landmarks: NormalizedLandmark[] | null,
+  markers: JointMarker[] = [],
 ): void {
   const { width, height } = ctx.canvas;
   ctx.clearRect(0, 0, width, height);
@@ -69,7 +77,7 @@ export function drawSkeleton(
   const scale = Math.max(width, height) / 640;
 
   ctx.lineWidth = 2.5 * scale;
-  ctx.strokeStyle = "rgba(47, 111, 237, 0.9)";
+  ctx.strokeStyle = "rgba(240, 244, 255, 0.85)";
   ctx.lineCap = "round";
   ctx.beginPath();
   for (const [from, to] of CONNECTIONS) {
@@ -81,12 +89,35 @@ export function drawSkeleton(
   }
   ctx.stroke();
 
-  ctx.fillStyle = "#7fff6a";
+  const marked = new Set(markers.map((m) => m.landmarkIndex));
+  ctx.fillStyle = "rgba(240, 244, 255, 0.9)";
   for (const idx of POINT_INDICES) {
+    if (marked.has(idx)) continue;
     const lm = landmarks[idx];
     if (!isDrawable(lm)) continue;
     ctx.beginPath();
-    ctx.arc(lm.x * width, lm.y * height, 4 * scale, 0, Math.PI * 2);
+    ctx.arc(lm.x * width, lm.y * height, 3 * scale, 0, Math.PI * 2);
     ctx.fill();
+  }
+
+  for (const marker of markers) {
+    const lm = landmarks[marker.landmarkIndex];
+    if (!isDrawable(lm)) continue;
+    const x = lm.x * width;
+    const y = lm.y * height;
+    ctx.beginPath();
+    ctx.arc(x, y, 6 * scale, 0, Math.PI * 2);
+    ctx.fillStyle = marker.color;
+    ctx.fill();
+    ctx.lineWidth = 1.5 * scale;
+    ctx.strokeStyle = "rgba(0,0,0,0.5)";
+    ctx.stroke();
+    if (marker.selected) {
+      ctx.beginPath();
+      ctx.arc(x, y, 9.5 * scale, 0, Math.PI * 2);
+      ctx.lineWidth = 2.5 * scale;
+      ctx.strokeStyle = "#ffffff";
+      ctx.stroke();
+    }
   }
 }
