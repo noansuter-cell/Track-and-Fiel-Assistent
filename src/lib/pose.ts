@@ -3,8 +3,9 @@ import { FilesetResolver, PoseLandmarker } from "@mediapipe/tasks-vision";
 // WASM runtime (copied from node_modules by scripts/copy-wasm.mjs) and the
 // BlazePose model are served by the app itself — no CDN at runtime, everything
 // stays on-device.
-const WASM_BASE_URL = "/mediapipe/wasm";
-const MODEL_URL = "/models/pose_landmarker_lite.task";
+const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+const WASM_BASE_URL = `${BASE_PATH}/mediapipe/wasm`;
+const MODEL_URL = `${BASE_PATH}/models/pose_landmarker_lite.task`;
 
 let landmarkerPromise: Promise<PoseLandmarker> | null = null;
 

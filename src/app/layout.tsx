@@ -4,7 +4,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "TrackCoach",
   description: "KI-Assistent für Leichtathletiktrainer – Phase 1: Pose Tracking",
-  manifest: "/manifest.webmanifest",
+  manifest: `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/manifest.webmanifest`,
 };
 
 export const viewport: Viewport = {

@@ -14,6 +14,13 @@ Es werden keine Videos hochgeladen.
 - Aufnahme: `getUserMedia` + `MediaRecorder`; Galerie-Import: `<input type="file">`
 - Rendering: `<canvas>`-Overlay über dem `<video>`-Element
 
+## Live-Version
+
+Jeder Push auf `main` deployt automatisch nach GitHub Pages
+(`.github/workflows/deploy-pages.yml`):
+
+**https://noansuter-cell.github.io/Track-and-Fiel-Assistent/**
+
 ## Entwicklung
 
 ```bash
@@ -21,7 +28,8 @@ npm install
 npm run dev
 ```
 
-Dann `http://localhost:3000` öffnen.
+Dann `http://localhost:3000` öffnen. (`npm run build` erzeugt einen statischen
+Export in `out/` – die App braucht keinen Server.)
 
 **Wichtig fürs Testen auf dem Handy:** Kamera-Zugriff (`getUserMedia`) funktioniert
 nur über **HTTPS** (oder `localhost`). Fürs Testen im lokalen Netz z.B. einen
