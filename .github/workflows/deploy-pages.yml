@@ -6,9 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
 concurrency:
   group: pages
@@ -17,9 +15,6 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -27,18 +22,14 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Configure GitHub Pages
-        id: pages
-        uses: actions/configure-pages@v5
-        with:
-          enablement: true
       - name: Build static export
         run: npm run build
         env:
-          NEXT_PUBLIC_BASE_PATH: ${{ steps.pages.outputs.base_path }}
-      - uses: actions/upload-pages-artifact@v3
+          NEXT_PUBLIC_BASE_PATH: /Track-and-Fiel-Assistent
+      # _next/ starts with an underscore — without .nojekyll, Jekyll drops it.
+      - run: touch out/.nojekyll
+      - name: Publish to gh-pages branch
+        uses: peaceiris/actions-gh-pages@v4
         with:
-          path: out
-      - name: Deploy
-        id: deployment
-        uses: actions/deploy-pages@v4
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./out
