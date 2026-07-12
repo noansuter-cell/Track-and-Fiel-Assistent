@@ -10,8 +10,17 @@ const MAX_ANALYZED_SECONDS = 120;
  */
 const INFERENCE_MAX_SIDE = 640;
 
-/** Sampling step for the legacy seek-based fallback path. */
-const FALLBACK_SAMPLE_FPS = 15;
+/** Sampling step for the seek-based fallback/densify path. */
+const FALLBACK_SAMPLE_FPS = 10;
+
+/**
+ * If playback capture ends up with fewer samples per second than this
+ * (e.g. the tab was throttled), re-analyze seek-based for short clips.
+ */
+const MIN_ACCEPTABLE_FPS = 4;
+
+/** Seek-based re-analysis is only worth it for clips up to this length. */
+const DENSIFY_MAX_SECONDS = 20;
 
 /** Abort if the video produces no new frame for this long during analysis. */
 const STALL_TIMEOUT_MS = 20_000;
@@ -82,10 +91,42 @@ export async function analyzeVideo(
       onProgress({ processedSec: timeSec, totalSec, frames: frames.length });
     };
 
-    const frames: FramePose[] =
-      typeof video.requestVideoFrameCallback === "function"
-        ? await captureByPlayback(video, totalSec, detectFrame, signal)
-        : await captureBySeeking(video, totalSec, detectFrame, signal);
+    // Warm up the model before playback starts: the very first inference
+    // triggers GPU shader compilation, which can take several seconds on
+    // phones — long enough for a short clip to play to its end unanalyzed.
+    await waitForFrameData(video, signal);
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    monotonicTimestampMs += 40;
+    landmarker.detectForVideo(canvas, monotonicTimestampMs);
+    const steadyStart = performance.now();
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    monotonicTimestampMs += 40;
+    landmarker.detectForVideo(canvas, monotonicTimestampMs);
+    const steadyMs = performance.now() - steadyStart;
+
+    let frames: FramePose[];
+    if (typeof video.requestVideoFrameCallback === "function") {
+      try {
+        frames = await captureByPlayback(video, totalSec, steadyMs, detectFrame, signal);
+      } catch (err) {
+        if (err instanceof PlaybackBlockedError) {
+          // e.g. iOS low-power mode refusing muted autoplay
+          frames = await captureBySeeking(video, totalSec, detectFrame, signal);
+        } else {
+          throw err;
+        }
+      }
+      // Playback capture came out too sparse (throttled tab, very slow
+      // device): re-analyze short clips deterministically via seeking.
+      if (
+        frames.length < totalSec * MIN_ACCEPTABLE_FPS &&
+        totalSec <= DENSIFY_MAX_SECONDS
+      ) {
+        frames = await captureBySeeking(video, totalSec, detectFrame, signal);
+      }
+    } else {
+      frames = await captureBySeeking(video, totalSec, detectFrame, signal);
+    }
 
     if (frames.length === 0) {
       throw new Error("Es konnten keine Frames aus dem Video gelesen werden.");
@@ -103,10 +144,13 @@ export async function analyzeVideo(
   }
 }
 
+class PlaybackBlockedError extends Error {}
+
 /** Fast path: play once, detect on every presented frame. */
 function captureByPlayback(
   video: HTMLVideoElement,
   totalSec: number,
+  steadyDetectMs: number,
   detectFrame: (timeSec: number, frames: FramePose[]) => void,
   signal?: AbortSignal,
 ): Promise<FramePose[]> {
@@ -116,6 +160,10 @@ function captureByPlayback(
     let stallTimer: ReturnType<typeof setTimeout> | undefined;
     let detectMsTotal = 0;
     let rateAdjusted = false;
+
+    // Slow device: inference eats most of the frame budget and samples get
+    // sparse. Slowing playback increases the sampling density.
+    video.playbackRate = steadyDetectMs > 80 ? 0.5 : 1;
 
     const finish = () => {
       if (finished) return;
@@ -155,8 +203,6 @@ function captureByPlayback(
         return;
       }
       detectMsTotal += performance.now() - started;
-      // Slow device: inference eats most of the frame budget and samples get
-      // sparse. Slowing playback doubles the sampling density.
       if (!rateAdjusted && frames.length === 5) {
         rateAdjusted = true;
         if (detectMsTotal / frames.length > 80) {
@@ -175,8 +221,17 @@ function captureByPlayback(
     armStallTimer();
     video.requestVideoFrameCallback(onFrame);
     video.currentTime = 0;
-    video.play().catch(() => fail(new Error("Video konnte nicht abgespielt werden.")));
+    video.play().catch(() => fail(new PlaybackBlockedError("Autoplay blockiert")));
   });
+}
+
+/** Wait until the video has decodable data for the current frame. */
+function waitForFrameData(
+  video: HTMLVideoElement,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (video.readyState >= 2) return Promise.resolve();
+  return waitForEvent(video, "loadeddata", signal);
 }
 
 /** Fallback for browsers without requestVideoFrameCallback: seek-based sampling. */
