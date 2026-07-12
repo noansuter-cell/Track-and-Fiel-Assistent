@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  pages: write
 
 concurrency:
   group: pages
@@ -33,3 +34,19 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./out
+      # Auto-enablement may have pointed Pages at main (renders the README);
+      # force the source to the gh-pages branch.
+      - name: Point Pages source at gh-pages branch
+        run: |
+          status=$(curl -sS -o /tmp/pages-resp.json -w "%{http_code}" -X PUT \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/pages" \
+            -d '{"source":{"branch":"gh-pages","path":"/"}}')
+          echo "PUT /pages -> $status"
+          cat /tmp/pages-resp.json
+          if [ "$status" -ge 400 ]; then
+            echo "::warning::Could not switch Pages source automatically. Set it manually: Settings -> Pages -> Branch: gh-pages"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
