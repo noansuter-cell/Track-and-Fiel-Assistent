@@ -108,6 +108,23 @@ export async function analyzeVideo(
     if (typeof video.requestVideoFrameCallback === "function") {
       try {
         frames = await captureByPlayback(video, totalSec, steadyMs, detectFrame, signal);
+        // Too sparse (throttled tab, very slow device): one extra slow-rate
+        // playback pass and merge. Never fall back to per-frame seeking here —
+        // seeking re-decodes from the last keyframe and takes minutes on
+        // 4K/HEVC phone videos.
+        if (
+          frames.length < totalSec * MIN_ACCEPTABLE_FPS &&
+          totalSec <= DENSIFY_MAX_SECONDS
+        ) {
+          const extra = await captureByPlayback(
+            video,
+            totalSec,
+            Number.POSITIVE_INFINITY, // force 0.5x rate
+            detectFrame,
+            signal,
+          );
+          frames = mergeFrames(frames, extra);
+        }
       } catch (err) {
         if (err instanceof PlaybackBlockedError) {
           // e.g. iOS low-power mode refusing muted autoplay
@@ -115,14 +132,6 @@ export async function analyzeVideo(
         } else {
           throw err;
         }
-      }
-      // Playback capture came out too sparse (throttled tab, very slow
-      // device): re-analyze short clips deterministically via seeking.
-      if (
-        frames.length < totalSec * MIN_ACCEPTABLE_FPS &&
-        totalSec <= DENSIFY_MAX_SECONDS
-      ) {
-        frames = await captureBySeeking(video, totalSec, detectFrame, signal);
       }
     } else {
       frames = await captureBySeeking(video, totalSec, detectFrame, signal);
@@ -145,6 +154,18 @@ export async function analyzeVideo(
 }
 
 class PlaybackBlockedError extends Error {}
+
+/** Merge two capture passes, sorted by time, dropping near-duplicates. */
+function mergeFrames(a: FramePose[], b: FramePose[]): FramePose[] {
+  const all = [...a, ...b].sort((x, y) => x.timeSec - y.timeSec);
+  const merged: FramePose[] = [];
+  for (const frame of all) {
+    const prev = merged[merged.length - 1];
+    if (prev && frame.timeSec - prev.timeSec < 0.008) continue;
+    merged.push(frame);
+  }
+  return merged;
+}
 
 /** Fast path: play once, detect on every presented frame. */
 function captureByPlayback(

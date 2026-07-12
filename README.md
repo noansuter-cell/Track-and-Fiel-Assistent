@@ -1,8 +1,16 @@
 # TrackCoach – KI-Assistent für Leichtathletiktrainer
 
-**Phase 1: Pose Tracking Grundlage.** Video aufnehmen oder aus der Galerie laden,
-Körperpunkte (33 BlazePose-Landmarks) pro Frame erkennen, Skeleton-Overlay synchron
-zum Video rendern, frame-genau scrubben, Rohdaten im Debug-Panel prüfen.
+Video aufnehmen oder aus der Galerie laden → die App erkennt 33 Körperpunkte pro
+Frame (BlazePose) und bewertet die Technik:
+
+- **Modi:** Sprint und Weitsprung
+- **Farbige Gelenkpunkte** (grün/gelb/orange/rot) nach Technik-Score; Punkt
+  antippen → Winkel + Coaching-Feedback
+- **Schlüsselmomente** (Bodenkontakte, Kniehub, Absprung/Flugmitte/Landung) als
+  Sprungmarken auf der Timeline, frame-genaues Scrubbing
+- **Messband** für Schrittlänge und Flughöhe (Kalibrierung über Körpergrösse)
+- **Athleten-Verwaltung** mit Verlauf und automatischen Arbeitsschwerpunkten
+  (lokal gespeichert, keine Cloud)
 
 Alles läuft **client-side im Browser** (MediaPipe PoseLandmarker via WASM/WebGL).
 Es werden keine Videos hochgeladen.

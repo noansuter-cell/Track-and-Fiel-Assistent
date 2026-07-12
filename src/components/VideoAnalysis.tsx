@@ -2,33 +2,58 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { analyzeVideo, resolveDuration, type AnalyzeProgress } from "@/lib/analyzeVideo";
-import { drawSkeleton, type JointMarker } from "@/lib/drawing";
+import {
+  addRecord,
+  getDefaultHeightCm,
+  saveAthlete,
+  setDefaultHeightCm,
+  type Athlete,
+} from "@/lib/athletes";
+import { drawSkeleton, drawTape, type JointMarker, type TapeMeasure } from "@/lib/drawing";
 import { landmarksAt, nearestFrameIndex } from "@/lib/frames";
 import {
-  computeSprintMetrics,
+  computeMetrics,
   JOINT_LABELS,
   JOINT_MARKER_LANDMARKS,
+  metersPerPixel,
+  MODE_LABELS,
   scoreColor,
+  type Metrics,
+  type Mode,
   type ScoredJoint,
 } from "@/lib/metrics";
 import type { PoseAnalysis } from "@/lib/types";
 
 interface Props {
   videoUrl: string;
+  mode: Mode;
+  athlete: Athlete | null;
+  onAthleteUpdated: () => void;
   onBack: () => void;
 }
 
 type Phase = "analyzing" | "ready" | "error";
+type SelectedMeasure = { kind: "step"; index: number } | { kind: "flight" } | null;
 
 const ALL_JOINTS = Object.keys(JOINT_MARKER_LANDMARKS) as ScoredJoint[];
 
-export default function VideoAnalysis({ videoUrl, onBack }: Props) {
+export default function VideoAnalysis({
+  videoUrl,
+  mode,
+  athlete,
+  onAthleteUpdated,
+  onBack,
+}: Props) {
   const [phase, setPhase] = useState<Phase>("analyzing");
   const [progress, setProgress] = useState<AnalyzeProgress | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const [analysis, setAnalysis] = useState<PoseAnalysis | null>(null);
   const [playing, setPlaying] = useState(false);
   const [selectedJoint, setSelectedJoint] = useState<ScoredJoint | null>(null);
+  const [selectedMeasure, setSelectedMeasure] = useState<SelectedMeasure>(null);
+  const [heightCm, setHeightCm] = useState<number | null>(
+    () => athlete?.heightCm ?? getDefaultHeightCm(),
+  );
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const analysisVideoRef = useRef<HTMLVideoElement>(null);
@@ -36,12 +61,15 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
   const sliderRef = useRef<HTMLInputElement>(null);
   const scrubbingRef = useRef(false);
   const selectedJointRef = useRef<ScoredJoint | null>(null);
+  const selectedMeasureRef = useRef<SelectedMeasure>(null);
+  const mppRef = useRef<number | null>(null);
+  const savedRef = useRef(false);
   const feedbackRef = useRef<HTMLSpanElement>(null);
   const feedbackDotRef = useRef<HTMLSpanElement>(null);
 
-  const metrics = useMemo(
-    () => (analysis ? computeSprintMetrics(analysis) : null),
-    [analysis],
+  const metrics: Metrics | null = useMemo(
+    () => (analysis ? computeMetrics(analysis, mode) : null),
+    [analysis, mode],
   );
 
   // --- Analysis pass: run the whole video through the landmarker once. ---
@@ -53,6 +81,8 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
     setProgress(null);
     setAnalysis(null);
     setSelectedJoint(null);
+    setSelectedMeasure(null);
+    savedRef.current = false;
     analyzeVideo(video, setProgress, controller.signal)
       .then((result) => {
         setAnalysis(result);
@@ -60,13 +90,86 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
       })
       .catch((err: unknown) => {
         if (err instanceof DOMException && err.name === "AbortError") return;
-        setErrorMessage(
-          err instanceof Error ? err.message : "Analyse fehlgeschlagen.",
-        );
+        setErrorMessage(err instanceof Error ? err.message : "Analyse fehlgeschlagen.");
         setPhase("error");
       });
     return () => controller.abort();
   }, [videoUrl]);
+
+  // Pixel→meter calibration follows the current height input.
+  useEffect(() => {
+    mppRef.current = metrics ? metersPerPixel(metrics.segmentChainPx, heightCm) : null;
+    const video = videoRef.current;
+    if (video) drawAt(video.currentTime);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [heightCm, metrics]);
+
+  // Persist analysis summary into the athlete's record — once per video.
+  useEffect(() => {
+    if (!metrics || !athlete || savedRef.current) return;
+    savedRef.current = true;
+    const jointSums = new Map<ScoredJoint, { sum: number; count: number }>();
+    for (const frame of metrics.perFrame) {
+      for (const joint of ALL_JOINTS) {
+        const assessment = frame[joint];
+        if (!assessment) continue;
+        const entry = jointSums.get(joint) ?? { sum: 0, count: 0 };
+        entry.sum += assessment.score;
+        entry.count++;
+        jointSums.set(joint, entry);
+      }
+    }
+    const jointAvgScores: Partial<Record<ScoredJoint, number>> = {};
+    for (const [joint, { sum, count }] of jointSums) {
+      if (count > 0) jointAvgScores[joint] = Math.round(sum / count);
+    }
+    const mpp = metersPerPixel(metrics.segmentChainPx, heightCm);
+    addRecord({
+      id: `rec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      athleteId: athlete.id,
+      dateISO: new Date().toISOString(),
+      mode: metrics.mode,
+      cadenceStepsPerSec: metrics.cadenceStepsPerSec,
+      meanTorsoLeanDeg: metrics.meanTorsoLeanDeg,
+      jointAvgScores,
+      stepLengthsM: mpp ? metrics.steps.map((s) => s.lengthPx * mpp) : [],
+      flightHeightM: mpp && metrics.jump ? metrics.jump.flightHeightPx * mpp : null,
+      takeoffAngleDeg: metrics.jump?.takeoffAngleDeg ?? null,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [metrics, athlete]);
+
+  const buildTape = useCallback(
+    (measure: SelectedMeasure): TapeMeasure | null => {
+      if (!measure || !metrics) return null;
+      const mpp = mppRef.current;
+      const format = (px: number) =>
+        mpp ? `${(px * mpp).toFixed(2)} m` : "Grösse eingeben für Meter";
+      if (measure.kind === "step") {
+        const step = metrics.steps[measure.index];
+        if (!step) return null;
+        return {
+          x1: step.x1,
+          y1: step.groundY,
+          x2: step.x2,
+          y2: step.groundY,
+          label: format(step.lengthPx),
+        };
+      }
+      if (measure.kind === "flight" && metrics.jump) {
+        const j = metrics.jump;
+        return {
+          x1: j.apexX,
+          y1: j.takeoffHipY,
+          x2: j.apexX,
+          y2: j.apexY,
+          label: format(j.flightHeightPx),
+        };
+      }
+      return null;
+    },
+    [metrics],
+  );
 
   const drawAt = useCallback(
     (timeSec: number) => {
@@ -93,6 +196,9 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
       }
       drawSkeleton(ctx, landmarks, markers);
 
+      const tape = buildTape(selectedMeasureRef.current);
+      if (tape) drawTape(ctx, tape);
+
       const selected = selectedJointRef.current;
       if (selected && feedbackRef.current && feedbackDotRef.current) {
         const assessment = assessments[selected];
@@ -105,14 +211,15 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
         }
       }
     },
-    [analysis, metrics],
+    [analysis, metrics, buildTape],
   );
 
   useEffect(() => {
     selectedJointRef.current = selectedJoint;
+    selectedMeasureRef.current = selectedMeasure;
     const video = videoRef.current;
     if (video) drawAt(video.currentTime);
-  }, [selectedJoint, drawAt]);
+  }, [selectedJoint, selectedMeasure, drawAt]);
 
   // --- Playback loop: keep overlay and slider in sync. ---
   useEffect(() => {
@@ -185,7 +292,6 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
     if (!video || !analysis) return;
     const clamped = Math.min(Math.max(timeSec, 0), analysis.durationSec);
     video.currentTime = clamped;
-    // Draw from cache immediately — no waiting for the browser to finish seeking.
     drawAt(clamped);
     if (sliderRef.current) sliderRef.current.value = String(clamped);
   };
@@ -202,6 +308,18 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
   const jumpToEvent = (timeSec: number) => {
     videoRef.current?.pause();
     seekTo(timeSec);
+  };
+
+  const updateHeight = (raw: string) => {
+    const parsed = parseInt(raw, 10);
+    const value = Number.isFinite(parsed) && parsed >= 100 && parsed <= 230 ? parsed : null;
+    setHeightCm(value);
+    if (athlete) {
+      saveAthlete({ ...athlete, heightCm: value });
+      onAthleteUpdated();
+    } else {
+      setDefaultHeightCm(value);
+    }
   };
 
   /** Tap on a colored joint selects it; tapping elsewhere toggles play. */
@@ -227,10 +345,7 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
         for (const landmarkIndex of JOINT_MARKER_LANDMARKS[joint]) {
           const lm = landmarks[landmarkIndex];
           if (!lm) continue;
-          const dist = Math.hypot(
-            (lm.x - px) * rect.width,
-            (lm.y - py) * rect.height,
-          );
+          const dist = Math.hypot((lm.x - px) * rect.width, (lm.y - py) * rect.height);
           if (dist < bestDist) {
             bestDist = dist;
             bestJoint = joint;
@@ -321,26 +436,49 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
   return (
     <main style={{ display: "flex", flexDirection: "column", gap: 10, padding: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <button onClick={onBack}>‹ Neues Video</button>
+        <button onClick={onBack}>‹ Fertig</button>
         <span style={{ color: "#9aa0a6", fontSize: 13 }}>
-          Sprint · {analysis.frames.length} Frames
+          {athlete ? `${athlete.name} · ` : ""}
+          {MODE_LABELS[metrics.mode]} · {analysis.frames.length} Frames
         </span>
       </div>
 
-      {(metrics.cadenceStepsPerSec !== null || metrics.meanTorsoLeanDeg !== null) && (
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {metrics.cadenceStepsPerSec !== null && (
-            <span style={statChipStyle}>
-              Kadenz ≈ {metrics.cadenceStepsPerSec.toFixed(1)} Schritte/s
-            </span>
-          )}
-          {metrics.meanTorsoLeanDeg !== null && (
-            <span style={statChipStyle}>
-              Ø Vorlage {metrics.meanTorsoLeanDeg.toFixed(0)}°
-            </span>
-          )}
-        </div>
-      )}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        {metrics.cadenceStepsPerSec !== null && (
+          <span style={statChipStyle}>
+            Kadenz ≈ {metrics.cadenceStepsPerSec.toFixed(1)} Schritte/s
+          </span>
+        )}
+        {metrics.meanTorsoLeanDeg !== null && (
+          <span style={statChipStyle}>Ø Vorlage {metrics.meanTorsoLeanDeg.toFixed(0)}°</span>
+        )}
+        {metrics.jump?.takeoffAngleDeg != null && (
+          <span style={statChipStyle}>
+            ∠ Absprung {metrics.jump.takeoffAngleDeg.toFixed(0)}° (Ziel 18–24°)
+          </span>
+        )}
+        <label style={{ ...statChipStyle, display: "inline-flex", alignItems: "center", gap: 6 }}>
+          Grösse
+          <input
+            type="number"
+            inputMode="numeric"
+            defaultValue={heightCm ?? ""}
+            placeholder="cm"
+            onChange={(e) => updateHeight(e.target.value)}
+            style={{
+              width: 52,
+              font: "inherit",
+              color: "inherit",
+              background: "transparent",
+              border: "none",
+              borderBottom: "1px solid #3c4250",
+              outline: "none",
+              textAlign: "center",
+            }}
+          />
+          cm
+        </label>
+      </div>
 
       <div
         style={{
@@ -375,7 +513,7 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
         />
       </div>
 
-      {metrics.events.length > 0 && (
+      {(metrics.events.length > 0 || metrics.steps.length > 0 || metrics.jump) && (
         <div
           style={{
             display: "flex",
@@ -385,19 +523,49 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
             WebkitOverflowScrolling: "touch",
           }}
         >
-          {metrics.events.map((event, i) => (
+          {metrics.jump && (
             <button
-              key={i}
-              onClick={() => jumpToEvent(event.timeSec)}
-              style={{
-                padding: "6px 10px",
-                fontSize: 12,
-                whiteSpace: "nowrap",
-                borderRadius: 999,
-                flexShrink: 0,
+              className={selectedMeasure?.kind === "flight" ? "primary" : undefined}
+              onClick={() => {
+                setSelectedMeasure((prev) => (prev?.kind === "flight" ? null : { kind: "flight" }));
+                jumpToEvent(analysis.frames[metrics.jump!.apexIndex].timeSec);
               }}
+              style={chipStyle}
             >
-              {event.kind === "contact" ? "👣" : "🦵"} {event.label} · {event.timeSec.toFixed(2)}s
+              📏 Flughöhe
+            </button>
+          )}
+          {metrics.steps.slice(0, 8).map((step, i) => (
+            <button
+              key={`step-${i}`}
+              className={
+                selectedMeasure?.kind === "step" && selectedMeasure.index === i
+                  ? "primary"
+                  : undefined
+              }
+              onClick={() => {
+                setSelectedMeasure((prev) =>
+                  prev?.kind === "step" && prev.index === i ? null : { kind: "step", index: i },
+                );
+                jumpToEvent(step.timeSec);
+              }}
+              style={chipStyle}
+            >
+              📏 Schritt {i + 1}
+            </button>
+          ))}
+          {metrics.events.map((event, i) => (
+            <button key={`ev-${i}`} onClick={() => jumpToEvent(event.timeSec)} style={chipStyle}>
+              {event.kind === "contact"
+                ? "👣"
+                : event.kind === "kneelift"
+                  ? "🦵"
+                  : event.kind === "takeoff"
+                    ? "🛫"
+                    : event.kind === "apex"
+                      ? "🪂"
+                      : "🛬"}{" "}
+              {event.label} · {event.timeSec.toFixed(2)}s
             </button>
           ))}
         </div>
@@ -466,6 +634,12 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
         ) : (
           <span style={{ color: "#9aa0a6" }}>
             Tippe einen farbigen Punkt im Video an, um Winkel &amp; Feedback zu sehen.
+            {athlete && (
+              <>
+                {" "}
+                Diese Analyse wurde in der Akte von {athlete.name} gespeichert.
+              </>
+            )}
             <br />
             <span style={{ fontSize: 12 }}>
               🟢 gut · 🟡 okay · 🟠 verbesserungswürdig · 🔴 fehlerhaft
@@ -484,4 +658,12 @@ const statChipStyle: React.CSSProperties = {
   padding: "4px 12px",
   fontSize: 13,
   color: "#c6cad2",
+};
+
+const chipStyle: React.CSSProperties = {
+  padding: "6px 10px",
+  fontSize: 12,
+  whiteSpace: "nowrap",
+  borderRadius: 999,
+  flexShrink: 0,
 };

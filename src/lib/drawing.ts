@@ -63,6 +63,69 @@ export interface JointMarker {
   selected: boolean;
 }
 
+/** Measuring tape between two points (normalized coords) with a label. */
+export interface TapeMeasure {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  label: string;
+}
+
+/** Draw a yellow measuring tape with end ticks and a centered label. */
+export function drawTape(ctx: CanvasRenderingContext2D, tape: TapeMeasure): void {
+  const { width, height } = ctx.canvas;
+  const scale = Math.max(width, height) / 640;
+  const x1 = tape.x1 * width;
+  const y1 = tape.y1 * height;
+  const x2 = tape.x2 * width;
+  const y2 = tape.y2 * height;
+
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const len = Math.hypot(dx, dy);
+  if (len < 1) return;
+  // Perpendicular unit vector for the end ticks.
+  const px = -dy / len;
+  const py = dx / len;
+  const tick = 8 * scale;
+
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.strokeStyle = "#facc15";
+  ctx.lineWidth = 3.5 * scale;
+  ctx.setLineDash([10 * scale, 6 * scale]);
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.moveTo(x1 - px * tick, y1 - py * tick);
+  ctx.lineTo(x1 + px * tick, y1 + py * tick);
+  ctx.moveTo(x2 - px * tick, y2 - py * tick);
+  ctx.lineTo(x2 + px * tick, y2 + py * tick);
+  ctx.stroke();
+
+  const cx = (x1 + x2) / 2;
+  const cy = (y1 + y2) / 2;
+  ctx.font = `bold ${14 * scale}px system-ui, sans-serif`;
+  const metrics = ctx.measureText(tape.label);
+  const padX = 8 * scale;
+  const padY = 6 * scale;
+  const boxW = metrics.width + padX * 2;
+  const boxH = 14 * scale + padY * 2;
+  ctx.fillStyle = "rgba(17, 19, 24, 0.85)";
+  ctx.beginPath();
+  ctx.roundRect(cx - boxW / 2, cy - boxH - 10 * scale, boxW, boxH, 6 * scale);
+  ctx.fill();
+  ctx.fillStyle = "#facc15";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(tape.label, cx, cy - boxH / 2 - 10 * scale);
+  ctx.restore();
+}
+
 /** Draw the skeleton for one frame. Canvas pixel size must match the video frame size. */
 export function drawSkeleton(
   ctx: CanvasRenderingContext2D,

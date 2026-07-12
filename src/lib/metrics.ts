@@ -2,6 +2,13 @@ import type { NormalizedLandmark } from "@mediapipe/tasks-vision";
 import { angleDeg } from "./geometry";
 import { LM, type PoseAnalysis } from "./types";
 
+export type Mode = "sprint" | "weitsprung";
+
+export const MODE_LABELS: Record<Mode, string> = {
+  sprint: "Sprint",
+  weitsprung: "Weitsprung",
+};
+
 /** Joints that get a per-frame score and are tappable in the UI. */
 export type ScoredJoint =
   | "leftElbow"
@@ -45,27 +52,64 @@ export interface JointAssessment {
 
 export type FrameAssessments = Partial<Record<ScoredJoint, JointAssessment>>;
 
-export interface SprintEvent {
+export interface MetricEvent {
   frameIndex: number;
   timeSec: number;
-  kind: "contact" | "kneelift";
+  kind: "contact" | "kneelift" | "takeoff" | "apex" | "landing";
   label: string;
 }
 
-export interface SprintMetrics {
+/** A measurable step between two alternating ground contacts (normalized coords). */
+export interface StepMeasure {
+  timeSec: number;
+  x1: number;
+  x2: number;
+  groundY: number;
+  lengthPx: number;
+}
+
+/** Long-jump specifics (normalized coords for drawing, px for measuring). */
+export interface JumpMeasure {
+  takeoffIndex: number;
+  apexIndex: number;
+  landingIndex: number;
+  takeoffAngleDeg: number | null;
+  apexX: number;
+  apexY: number;
+  takeoffHipY: number;
+  flightHeightPx: number;
+}
+
+export interface Metrics {
+  mode: Mode;
   /** Parallel to analysis.frames. */
   perFrame: FrameAssessments[];
-  /** Key moments (ground contacts, knee-lift peaks) for timeline chips. */
-  events: SprintEvent[];
+  events: MetricEvent[];
+  steps: StepMeasure[];
+  jump: JumpMeasure | null;
   cadenceStepsPerSec: number | null;
   meanTorsoLeanDeg: number | null;
+  /**
+   * Median length of the nose→shoulder→hip→knee→ankle segment chain in
+   * pixels (≈ 88% of body height) — the pixel↔meter calibration anchor.
+   */
+  segmentChainPx: number | null;
+}
+
+/** Meters per pixel given the athlete's height; null without calibration data. */
+export function metersPerPixel(
+  segmentChainPx: number | null,
+  heightCm: number | null,
+): number | null {
+  if (!segmentChainPx || !heightCm || heightCm < 100 || heightCm > 230) return null;
+  return ((heightCm / 100) * 0.88) / segmentChainPx;
 }
 
 export function scoreColor(score: number): string {
-  if (score >= 80) return "#22c55e"; // green
-  if (score >= 60) return "#eab308"; // yellow
-  if (score >= 40) return "#f97316"; // orange
-  return "#ef4444"; // red
+  if (score >= 80) return "#22c55e";
+  if (score >= 60) return "#eab308";
+  if (score >= 40) return "#f97316";
+  return "#ef4444";
 }
 
 const MIN_VIS = 0.5;
@@ -83,6 +127,12 @@ function mid(a: NormalizedLandmark, b: NormalizedLandmark) {
   return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
 }
 
+function median(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
 /** Elevation of the thigh: 0° = hanging straight down, 90° = horizontal. */
 function thighElevationDeg(hip: NormalizedLandmark, knee: NormalizedLandmark): number {
   const vx = knee.x - hip.x;
@@ -92,10 +142,24 @@ function thighElevationDeg(hip: NormalizedLandmark, knee: NormalizedLandmark): n
   return (Math.acos(Math.min(1, Math.max(-1, vy / len))) * 180) / Math.PI;
 }
 
-export function computeSprintMetrics(analysis: PoseAnalysis): SprintMetrics {
+interface Contact {
+  frameIndex: number;
+  timeSec: number;
+  side: "links" | "rechts";
+  ankleX: number;
+  ankleY: number;
+}
+
+export function computeMetrics(analysis: PoseAnalysis, mode: Mode): Metrics {
   const frames = analysis.frames;
   const n = frames.length;
   const times = frames.map((f) => f.timeSec);
+  const W = analysis.videoWidth;
+  const H = analysis.videoHeight;
+  const pxDist = (
+    a: { x: number; y: number },
+    b: { x: number; y: number },
+  ): number => Math.hypot((a.x - b.x) * W, (a.y - b.y) * H);
 
   // Running direction: sign of horizontal hip movement over the clip.
   let direction = 1;
@@ -112,21 +176,18 @@ export function computeSprintMetrics(analysis: PoseAnalysis): SprintMetrics {
     }
   }
 
-  // Precompute per-frame raw series used by windowed scores.
-  const thighElev: { left: (number | null)[]; right: (number | null)[] } = {
-    left: [],
-    right: [],
-  };
-  const hipAngle: { left: (number | null)[]; right: (number | null)[] } = {
-    left: [],
-    right: [],
-  };
+  // --- Per-frame raw series ---
+  const thighElev = { left: [] as (number | null)[], right: [] as (number | null)[] };
+  const hipAngle = { left: [] as (number | null)[], right: [] as (number | null)[] };
   const noseY: (number | null)[] = [];
   const torsoLen: (number | null)[] = [];
-  const ankleY: { left: (number | null)[]; right: (number | null)[] } = {
-    left: [],
-    right: [],
+  const ankle = {
+    left: [] as ({ x: number; y: number } | null)[],
+    right: [] as ({ x: number; y: number } | null)[],
   };
+  const hipMidY: (number | null)[] = [];
+  const hipMidX: (number | null)[] = [];
+  const segChainPxSamples: number[] = [];
 
   for (const f of frames) {
     const lm = f.landmarks;
@@ -143,8 +204,10 @@ export function computeSprintMetrics(analysis: PoseAnalysis): SprintMetrics {
     hipAngle.left.push(l.hip);
     hipAngle.right.push(r.hip);
 
-    if (lm && vis(lm[LM.NOSE])) noseY.push(lm[LM.NOSE].y);
-    else noseY.push(null);
+    noseY.push(lm && vis(lm[LM.NOSE]) ? lm[LM.NOSE].y : null);
+    ankle.left.push(lm && vis(lm[LM.LEFT_ANKLE]) ? { x: lm[LM.LEFT_ANKLE].x, y: lm[LM.LEFT_ANKLE].y } : null);
+    ankle.right.push(lm && vis(lm[LM.RIGHT_ANKLE]) ? { x: lm[LM.RIGHT_ANKLE].x, y: lm[LM.RIGHT_ANKLE].y } : null);
+
     if (
       lm &&
       vis(lm[LM.LEFT_SHOULDER]) &&
@@ -155,11 +218,31 @@ export function computeSprintMetrics(analysis: PoseAnalysis): SprintMetrics {
       const s = mid(lm[LM.LEFT_SHOULDER], lm[LM.RIGHT_SHOULDER]);
       const h = mid(lm[LM.LEFT_HIP], lm[LM.RIGHT_HIP]);
       torsoLen.push(Math.hypot(s.x - h.x, s.y - h.y));
+      hipMidY.push(h.y);
+      hipMidX.push(h.x);
+
+      // Calibration chain: nose→shoulderMid→hipMid→knee→ankle (side average).
+      if (vis(lm[LM.NOSE])) {
+        const legs: number[] = [];
+        for (const [hipI, kneeI, ankleI] of [
+          [LM.LEFT_HIP, LM.LEFT_KNEE, LM.LEFT_ANKLE],
+          [LM.RIGHT_HIP, LM.RIGHT_KNEE, LM.RIGHT_ANKLE],
+        ] as const) {
+          if (vis(lm[hipI]) && vis(lm[kneeI]) && vis(lm[ankleI])) {
+            legs.push(pxDist(lm[hipI], lm[kneeI]) + pxDist(lm[kneeI], lm[ankleI]));
+          }
+        }
+        if (legs.length > 0) {
+          segChainPxSamples.push(
+            pxDist(lm[LM.NOSE], s) + pxDist(s, h) + legs.reduce((a, b) => a + b, 0) / legs.length,
+          );
+        }
+      }
     } else {
       torsoLen.push(null);
+      hipMidY.push(null);
+      hipMidX.push(null);
     }
-    ankleY.left.push(lm && vis(lm[LM.LEFT_ANKLE]) ? lm[LM.LEFT_ANKLE].y : null);
-    ankleY.right.push(lm && vis(lm[LM.RIGHT_ANKLE]) ? lm[LM.RIGHT_ANKLE].y : null);
   }
 
   const windowedMax = (
@@ -179,7 +262,7 @@ export function computeSprintMetrics(analysis: PoseAnalysis): SprintMetrics {
     return best;
   };
 
-  // --- Per-frame assessments ---
+  // --- Per-frame assessments (run technique, applies to both modes) ---
   const perFrame: FrameAssessments[] = [];
   const leanSamples: number[] = [];
 
@@ -191,7 +274,6 @@ export function computeSprintMetrics(analysis: PoseAnalysis): SprintMetrics {
       continue;
     }
 
-    // Arm carriage: elbow angle, target ~90° (60–110° fine).
     for (const [joint, s, e, w] of [
       ["leftElbow", LM.LEFT_SHOULDER, LM.LEFT_ELBOW, LM.LEFT_WRIST],
       ["rightElbow", LM.RIGHT_SHOULDER, LM.RIGHT_ELBOW, LM.RIGHT_WRIST],
@@ -214,7 +296,6 @@ export function computeSprintMetrics(analysis: PoseAnalysis): SprintMetrics {
       }
     }
 
-    // Knee lift: best thigh elevation reached around this moment.
     for (const [joint, series] of [
       ["leftKnee", thighElev.left],
       ["rightKnee", thighElev.right],
@@ -234,7 +315,6 @@ export function computeSprintMetrics(analysis: PoseAnalysis): SprintMetrics {
       }
     }
 
-    // Hip extension at push-off: best hip opening around this moment.
     for (const [joint, series] of [
       ["leftHip", hipAngle.left],
       ["rightHip", hipAngle.right],
@@ -254,17 +334,11 @@ export function computeSprintMetrics(analysis: PoseAnalysis): SprintMetrics {
       }
     }
 
-    // Torso lean relative to vertical, in running direction (5–15° ideal).
-    if (
-      vis(lm[LM.LEFT_SHOULDER]) &&
-      vis(lm[LM.RIGHT_SHOULDER]) &&
-      vis(lm[LM.LEFT_HIP]) &&
-      vis(lm[LM.RIGHT_HIP])
-    ) {
-      const s = mid(lm[LM.LEFT_SHOULDER], lm[LM.RIGHT_SHOULDER]);
-      const h = mid(lm[LM.LEFT_HIP], lm[LM.RIGHT_HIP]);
-      const lean =
-        (Math.atan2((s.x - h.x) * direction, h.y - s.y) * 180) / Math.PI;
+    if (torsoLen[i] !== null && hipMidY[i] !== null) {
+      const lm2 = lm;
+      const s = mid(lm2[LM.LEFT_SHOULDER], lm2[LM.RIGHT_SHOULDER]);
+      const h = mid(lm2[LM.LEFT_HIP], lm2[LM.RIGHT_HIP]);
+      const lean = (Math.atan2((s.x - h.x) * direction, h.y - s.y) * 180) / Math.PI;
       leanSamples.push(lean);
       const dist = lean < 5 ? 5 - lean : lean > 15 ? lean - 15 : 0;
       const score = clampScore(100 - dist * 4);
@@ -279,7 +353,6 @@ export function computeSprintMetrics(analysis: PoseAnalysis): SprintMetrics {
       };
     }
 
-    // Head stability: rolling deviation of the nose relative to torso length.
     {
       const win: number[] = [];
       for (let j = 0; j < n; j++) {
@@ -290,9 +363,7 @@ export function computeSprintMetrics(analysis: PoseAnalysis): SprintMetrics {
       const tl = torsoLen[i];
       if (win.length >= 4 && tl) {
         const mean = win.reduce((x, y) => x + y, 0) / win.length;
-        const sd = Math.sqrt(
-          win.reduce((x, y) => x + (y - mean) ** 2, 0) / win.length,
-        );
+        const sd = Math.sqrt(win.reduce((x, y) => x + (y - mean) ** 2, 0) / win.length);
         const ratio = sd / tl;
         const score = clampScore(100 - Math.max(0, ratio - 0.05) * 500);
         a.head = {
@@ -311,68 +382,140 @@ export function computeSprintMetrics(analysis: PoseAnalysis): SprintMetrics {
   }
 
   // --- Ground contacts: local maxima of ankle Y (image Y grows downwards). ---
-  const contacts: SprintEvent[] = [];
+  const contacts: Contact[] = [];
   for (const [side, series] of [
-    ["links", ankleY.left],
-    ["rechts", ankleY.right],
+    ["links", ankle.left],
+    ["rechts", ankle.right],
   ] as const) {
     const valid = series
-      .map((y, i) => ({ y, i }))
-      .filter((p): p is { y: number; i: number } => p.y !== null);
+      .map((p, i) => ({ p, i }))
+      .filter((e): e is { p: { x: number; y: number }; i: number } => e.p !== null);
     if (valid.length < 5) continue;
-    const ys = valid.map((p) => p.y);
+    const ys = valid.map((e) => e.p.y);
     const maxY = Math.max(...ys);
     const minY = Math.min(...ys);
     const threshold = maxY - (maxY - minY) * 0.15;
     let lastT = -Infinity;
     for (let k = 1; k < valid.length - 1; k++) {
-      const { y, i } = valid[k];
-      if (y < threshold) continue;
-      if (y < valid[k - 1].y || y < valid[k + 1].y) continue;
+      const { p, i } = valid[k];
+      if (p.y < threshold) continue;
+      if (p.y < valid[k - 1].p.y || p.y < valid[k + 1].p.y) continue;
       if (times[i] - lastT < 0.18) continue;
       lastT = times[i];
-      contacts.push({
-        frameIndex: i,
-        timeSec: times[i],
-        kind: "contact",
-        label: `Kontakt ${side}`,
-      });
+      contacts.push({ frameIndex: i, timeSec: times[i], side, ankleX: p.x, ankleY: p.y });
     }
   }
   contacts.sort((a, b) => a.timeSec - b.timeSec);
 
-  // Knee-lift peaks between consecutive contacts.
-  const kneelifts: SprintEvent[] = [];
+  // --- Steps between alternating contacts (for the measuring tape) ---
+  const steps: StepMeasure[] = [];
   for (let c = 0; c + 1 < contacts.length; c++) {
-    const from = contacts[c].frameIndex;
-    const to = contacts[c + 1].frameIndex;
-    let bestI = -1;
-    let bestV = -Infinity;
-    for (let i = from + 1; i < to; i++) {
-      const v = Math.max(thighElev.left[i] ?? -Infinity, thighElev.right[i] ?? -Infinity);
-      if (v > bestV) {
-        bestV = v;
-        bestI = i;
-      }
+    const a = contacts[c];
+    const b = contacts[c + 1];
+    const dt = b.timeSec - a.timeSec;
+    if (a.side === b.side || dt < 0.1 || dt > 0.8) continue;
+    const lengthPx = Math.abs(b.ankleX - a.ankleX) * W;
+    if (lengthPx < W * 0.02) continue;
+    steps.push({
+      timeSec: b.timeSec,
+      x1: a.ankleX,
+      x2: b.ankleX,
+      groundY: Math.max(a.ankleY, b.ankleY),
+      lengthPx,
+    });
+  }
+
+  // --- Long jump: the longest airborne gap between contacts ---
+  let jump: JumpMeasure | null = null;
+  if (mode === "weitsprung" && contacts.length >= 2) {
+    let best: { a: Contact; b: Contact; dt: number } | null = null;
+    for (let c = 0; c + 1 < contacts.length; c++) {
+      const dt = contacts[c + 1].timeSec - contacts[c].timeSec;
+      if (!best || dt > best.dt) best = { a: contacts[c], b: contacts[c + 1], dt };
     }
-    if (bestI >= 0 && bestV > 30) {
-      kneelifts.push({
-        frameIndex: bestI,
-        timeSec: times[bestI],
-        kind: "kneelift",
-        label: "Kniehub",
-      });
+    if (best && best.dt >= 0.3) {
+      const from = best.a.frameIndex;
+      const to = best.b.frameIndex;
+      let apexIndex = -1;
+      let apexY = Infinity;
+      for (let i = from; i <= to; i++) {
+        const y = hipMidY[i];
+        if (y !== null && y < apexY) {
+          apexY = y;
+          apexIndex = i;
+        }
+      }
+      const takeoffHipY = hipMidY[from];
+      const apexXVal = apexIndex >= 0 ? hipMidX[apexIndex] : null;
+      if (apexIndex >= 0 && takeoffHipY !== null && apexXVal !== null) {
+        // Takeoff angle from the hip trajectory shortly after takeoff.
+        let takeoffAngleDeg: number | null = null;
+        const x0 = hipMidX[from];
+        for (let i = from + 1; i < n && times[i] - times[from] <= 0.2; i++) {
+          const x1 = hipMidX[i];
+          const y1 = hipMidY[i];
+          if (x0 !== null && x1 !== null && y1 !== null && Math.abs(x1 - x0) > 0.005) {
+            takeoffAngleDeg =
+              (Math.atan2((takeoffHipY - y1) * H, Math.abs(x1 - x0) * W) * 180) / Math.PI;
+          }
+        }
+        jump = {
+          takeoffIndex: from,
+          apexIndex,
+          landingIndex: to,
+          takeoffAngleDeg,
+          apexX: apexXVal,
+          apexY,
+          takeoffHipY,
+          flightHeightPx: (takeoffHipY - apexY) * H,
+        };
+      }
     }
   }
 
-  const events = [...contacts, ...kneelifts]
-    .sort((a, b) => a.timeSec - b.timeSec)
-    .slice(0, 12);
+  // --- Timeline events ---
+  const events: MetricEvent[] = contacts.map((c) => ({
+    frameIndex: c.frameIndex,
+    timeSec: c.timeSec,
+    kind: "contact" as const,
+    label: `Kontakt ${c.side}`,
+  }));
+
+  if (mode === "sprint") {
+    for (let c = 0; c + 1 < contacts.length; c++) {
+      const from = contacts[c].frameIndex;
+      const to = contacts[c + 1].frameIndex;
+      let bestI = -1;
+      let bestV = -Infinity;
+      for (let i = from + 1; i < to; i++) {
+        const v = Math.max(thighElev.left[i] ?? -Infinity, thighElev.right[i] ?? -Infinity);
+        if (v > bestV) {
+          bestV = v;
+          bestI = i;
+        }
+      }
+      if (bestI >= 0 && bestV > 30) {
+        events.push({
+          frameIndex: bestI,
+          timeSec: times[bestI],
+          kind: "kneelift",
+          label: "Kniehub",
+        });
+      }
+    }
+  } else if (jump) {
+    events.push(
+      { frameIndex: jump.takeoffIndex, timeSec: times[jump.takeoffIndex], kind: "takeoff", label: "Absprung" },
+      { frameIndex: jump.apexIndex, timeSec: times[jump.apexIndex], kind: "apex", label: "Flugmitte" },
+      { frameIndex: jump.landingIndex, timeSec: times[jump.landingIndex], kind: "landing", label: "Landung" },
+    );
+  }
+
+  const sortedEvents = events.sort((a, b) => a.timeSec - b.timeSec).slice(0, 14);
 
   const cadenceStepsPerSec =
     contacts.length >= 3
-      ? (contacts.length - 1) /
-        (contacts[contacts.length - 1].timeSec - contacts[0].timeSec)
+      ? (contacts.length - 1) / (contacts[contacts.length - 1].timeSec - contacts[0].timeSec)
       : null;
 
   const meanTorsoLeanDeg =
@@ -380,5 +523,14 @@ export function computeSprintMetrics(analysis: PoseAnalysis): SprintMetrics {
       ? leanSamples.reduce((x, y) => x + y, 0) / leanSamples.length
       : null;
 
-  return { perFrame, events, cadenceStepsPerSec, meanTorsoLeanDeg };
+  return {
+    mode,
+    perFrame,
+    events: sortedEvents,
+    steps,
+    jump,
+    cadenceStepsPerSec,
+    meanTorsoLeanDeg,
+    segmentChainPx: median(segChainPxSamples),
+  };
 }
