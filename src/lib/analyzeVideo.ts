@@ -1,15 +1,25 @@
 import { getPoseLandmarker } from "./pose";
 import type { FramePose, PoseAnalysis } from "./types";
 
-/** Sampling rate for the analysis pass. Scrubbing snaps to these samples. */
-export const SAMPLE_FPS = 30;
+/** Analyze at most this much video (safety cap for very long clips). */
+const MAX_ANALYZED_SECONDS = 120;
 
-/** Hard cap so very long videos can't lock up the device (2 min @ 30 fps). */
-const MAX_FRAMES = 3600;
+/**
+ * Frames are downscaled to this long-side size before inference. BlazePose
+ * works on a small internal input anyway; feeding 4K frames just wastes time.
+ */
+const INFERENCE_MAX_SIDE = 640;
+
+/** Sampling step for the legacy seek-based fallback path. */
+const FALLBACK_SAMPLE_FPS = 15;
+
+/** Abort if the video produces no new frame for this long during analysis. */
+const STALL_TIMEOUT_MS = 20_000;
 
 export interface AnalyzeProgress {
-  done: number;
-  total: number;
+  processedSec: number;
+  totalSec: number;
+  frames: number;
 }
 
 // The landmarker singleton runs in VIDEO mode, which requires timestamps to
@@ -17,59 +27,174 @@ export interface AnalyzeProgress {
 let monotonicTimestampMs = 0;
 
 /**
- * Runs the whole video through the pose landmarker once, frame by frame
- * (seek-based, deterministic), and returns all landmarks as a cache.
+ * Runs the whole video through the pose landmarker once and returns all
+ * landmarks as a cache.
+ *
+ * Primary strategy: play the video once (muted) and capture every presented
+ * frame via requestVideoFrameCallback — the hardware decoder works
+ * sequentially, which is fast even for 4K/HEVC phone videos. Seeking frame by
+ * frame instead would force a keyframe re-decode per step and can take
+ * minutes on mobile. Analysis time ≈ video duration.
+ *
+ * The caller provides the video element and must keep it VISIBLE in the DOM:
+ * requestVideoFrameCallback only fires for composited (on-screen) videos.
  */
 export async function analyzeVideo(
-  videoUrl: string,
+  video: HTMLVideoElement,
   onProgress: (p: AnalyzeProgress) => void,
   signal?: AbortSignal,
 ): Promise<PoseAnalysis> {
   const landmarker = await getPoseLandmarker();
-  const video = document.createElement("video");
   video.muted = true;
   video.playsInline = true;
-  video.preload = "auto";
-  video.src = videoUrl;
 
   try {
-    await waitForEvent(video, "loadedmetadata", signal);
+    if (video.readyState < 1) {
+      await waitForEvent(video, "loadedmetadata", signal);
+    }
     const durationSec = await resolveDuration(video, signal);
 
     if (!video.videoWidth || !video.videoHeight) {
       throw new Error("Video hat keine lesbaren Bilddaten.");
     }
+    const totalSec = Math.min(durationSec, MAX_ANALYZED_SECONDS);
 
-    const total = Math.min(
-      Math.max(1, Math.floor(durationSec * SAMPLE_FPS)),
-      MAX_FRAMES,
+    // Downscale frames before inference; landmarks are normalized, so the
+    // overlay is unaffected.
+    const scale = Math.min(
+      1,
+      INFERENCE_MAX_SIDE / Math.max(video.videoWidth, video.videoHeight),
     );
-    const frames: FramePose[] = [];
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(2, Math.round(video.videoWidth * scale));
+    canvas.height = Math.max(2, Math.round(video.videoHeight * scale));
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Canvas-Kontext nicht verfügbar.");
 
-    for (let i = 0; i < total; i++) {
-      if (signal?.aborted) throw new DOMException("Abgebrochen", "AbortError");
-      const timeSec = Math.min(i / SAMPLE_FPS, Math.max(0, durationSec - 0.001));
-      await seekTo(video, timeSec, signal);
-      monotonicTimestampMs += 1000 / SAMPLE_FPS;
-      const result = landmarker.detectForVideo(video, monotonicTimestampMs);
+    const detectFrame = (timeSec: number, frames: FramePose[]) => {
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      monotonicTimestampMs += 40;
+      const result = landmarker.detectForVideo(canvas, monotonicTimestampMs);
       frames.push({
         timeSec,
         landmarks: result.landmarks.length > 0 ? result.landmarks[0] : null,
       });
-      onProgress({ done: i + 1, total });
+      onProgress({ processedSec: timeSec, totalSec, frames: frames.length });
+    };
+
+    const frames: FramePose[] =
+      typeof video.requestVideoFrameCallback === "function"
+        ? await captureByPlayback(video, totalSec, detectFrame, signal)
+        : await captureBySeeking(video, totalSec, detectFrame, signal);
+
+    if (frames.length === 0) {
+      throw new Error("Es konnten keine Frames aus dem Video gelesen werden.");
     }
 
     return {
       frames,
-      sampleFps: SAMPLE_FPS,
-      durationSec,
+      sampleFps: frames.length / totalSec,
+      durationSec: totalSec,
       videoWidth: video.videoWidth,
       videoHeight: video.videoHeight,
     };
   } finally {
-    video.removeAttribute("src");
-    video.load();
+    video.pause();
   }
+}
+
+/** Fast path: play once, detect on every presented frame. */
+function captureByPlayback(
+  video: HTMLVideoElement,
+  totalSec: number,
+  detectFrame: (timeSec: number, frames: FramePose[]) => void,
+  signal?: AbortSignal,
+): Promise<FramePose[]> {
+  return new Promise((resolve, reject) => {
+    const frames: FramePose[] = [];
+    let finished = false;
+    let stallTimer: ReturnType<typeof setTimeout> | undefined;
+    let detectMsTotal = 0;
+    let rateAdjusted = false;
+
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      resolve(frames);
+    };
+    const fail = (err: Error) => {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      reject(err);
+    };
+    const cleanup = () => {
+      if (stallTimer) clearTimeout(stallTimer);
+      video.removeEventListener("ended", finish);
+      signal?.removeEventListener("abort", onAbort);
+      video.pause();
+    };
+    const onAbort = () => fail(new DOMException("Abgebrochen", "AbortError"));
+    const armStallTimer = () => {
+      if (stallTimer) clearTimeout(stallTimer);
+      stallTimer = setTimeout(
+        () => fail(new Error("Die Videoanalyse ist stehengeblieben.")),
+        STALL_TIMEOUT_MS,
+      );
+    };
+
+    const onFrame: VideoFrameRequestCallback = (_now, meta) => {
+      if (finished) return;
+      armStallTimer();
+      const started = performance.now();
+      try {
+        detectFrame(meta.mediaTime, frames);
+      } catch (err) {
+        fail(err instanceof Error ? err : new Error("Pose-Erkennung fehlgeschlagen."));
+        return;
+      }
+      detectMsTotal += performance.now() - started;
+      // Slow device: inference eats most of the frame budget and samples get
+      // sparse. Slowing playback doubles the sampling density.
+      if (!rateAdjusted && frames.length === 5) {
+        rateAdjusted = true;
+        if (detectMsTotal / frames.length > 80) {
+          video.playbackRate = 0.5;
+        }
+      }
+      if (meta.mediaTime >= totalSec) {
+        finish();
+        return;
+      }
+      video.requestVideoFrameCallback(onFrame);
+    };
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+    video.addEventListener("ended", finish, { once: true });
+    armStallTimer();
+    video.requestVideoFrameCallback(onFrame);
+    video.currentTime = 0;
+    video.play().catch(() => fail(new Error("Video konnte nicht abgespielt werden.")));
+  });
+}
+
+/** Fallback for browsers without requestVideoFrameCallback: seek-based sampling. */
+async function captureBySeeking(
+  video: HTMLVideoElement,
+  totalSec: number,
+  detectFrame: (timeSec: number, frames: FramePose[]) => void,
+  signal?: AbortSignal,
+): Promise<FramePose[]> {
+  const frames: FramePose[] = [];
+  const total = Math.max(1, Math.floor(totalSec * FALLBACK_SAMPLE_FPS));
+  for (let i = 0; i < total; i++) {
+    if (signal?.aborted) throw new DOMException("Abgebrochen", "AbortError");
+    const timeSec = Math.min(i / FALLBACK_SAMPLE_FPS, Math.max(0, totalSec - 0.001));
+    await seekTo(video, timeSec, signal);
+    detectFrame(timeSec, frames);
+  }
+  return frames;
 }
 
 /**

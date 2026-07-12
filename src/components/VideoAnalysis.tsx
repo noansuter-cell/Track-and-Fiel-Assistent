@@ -21,6 +21,7 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
   const [playing, setPlaying] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  const analysisVideoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const sliderRef = useRef<HTMLInputElement>(null);
   const scrubbingRef = useRef(false);
@@ -36,11 +37,13 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
 
   // --- Analysis pass: run the whole video through the landmarker once. ---
   useEffect(() => {
+    const video = analysisVideoRef.current;
+    if (!video) return;
     const controller = new AbortController();
     setPhase("analyzing");
     setProgress(null);
     setAnalysis(null);
-    analyzeVideo(videoUrl, setProgress, controller.signal)
+    analyzeVideo(video, setProgress, controller.signal)
       .then((result) => {
         setAnalysis(result);
         setPhase("ready");
@@ -55,11 +58,23 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
     return () => controller.abort();
   }, [videoUrl]);
 
+  // Frames come from real presented video frames, so they are not uniformly
+  // spaced — binary-search the nearest cached frame.
   const frameIndexAt = useCallback(
     (timeSec: number): number => {
-      if (!analysis) return -1;
-      const idx = Math.round(timeSec * analysis.sampleFps);
-      return Math.min(Math.max(idx, 0), analysis.frames.length - 1);
+      if (!analysis || analysis.frames.length === 0) return -1;
+      const frames = analysis.frames;
+      let lo = 0;
+      let hi = frames.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (frames[mid].timeSec < timeSec) lo = mid + 1;
+        else hi = mid;
+      }
+      if (lo > 0 && timeSec - frames[lo - 1].timeSec < frames[lo].timeSec - timeSec) {
+        return lo - 1;
+      }
+      return lo;
     },
     [analysis],
   );
@@ -181,7 +196,9 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
     const video = videoRef.current;
     if (!video || !analysis) return;
     video.pause();
-    seekTo(video.currentTime + direction / analysis.sampleFps);
+    const idx = frameIndexAt(video.currentTime);
+    const next = Math.min(Math.max(idx + direction, 0), analysis.frames.length - 1);
+    seekTo(analysis.frames[next].timeSec);
   };
 
   if (phase === "error") {
@@ -194,7 +211,9 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
   }
 
   if (phase === "analyzing" || !analysis) {
-    const percent = progress ? Math.round((progress.done / progress.total) * 100) : 0;
+    const percent = progress
+      ? Math.min(100, Math.round((progress.processedSec / progress.totalSec) * 100))
+      : 0;
     return (
       <main
         style={{
@@ -207,6 +226,23 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
           padding: 24,
         }}
       >
+        {/* Must stay visible: requestVideoFrameCallback only fires for
+            composited videos, and the analysis captures its frames live. */}
+        <video
+          ref={analysisVideoRef}
+          src={videoUrl}
+          muted
+          playsInline
+          preload="auto"
+          style={{
+            width: "100%",
+            maxWidth: 480,
+            maxHeight: "45dvh",
+            background: "#000",
+            borderRadius: 8,
+            objectFit: "contain",
+          }}
+        />
         <p>{progress ? "Analysiere Video…" : "Lade Pose-Modell…"}</p>
         <div
           style={{
@@ -227,7 +263,9 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
           />
         </div>
         <p style={{ color: "#9aa0a6", fontVariantNumeric: "tabular-nums" }}>
-          {progress ? `${progress.done} / ${progress.total} Frames (${percent} %)` : ""}
+          {progress
+            ? `${progress.processedSec.toFixed(1)} s / ${progress.totalSec.toFixed(1)} s (${percent} %)`
+            : ""}
         </p>
         <button onClick={onBack}>Abbrechen</button>
       </main>
@@ -241,7 +279,7 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <button onClick={onBack}>‹ Neues Video</button>
         <span style={{ color: "#9aa0a6", fontSize: 13 }}>
-          {analysis.videoWidth}×{analysis.videoHeight} · {analysis.sampleFps} fps Analyse
+          {analysis.videoWidth}×{analysis.videoHeight} · {analysis.frames.length} Frames analysiert
         </span>
       </div>
 
@@ -289,7 +327,7 @@ export default function VideoAnalysis({ videoUrl, onBack }: Props) {
           type="range"
           min={0}
           max={analysis.durationSec}
-          step={1 / analysis.sampleFps}
+          step={0.01}
           defaultValue={0}
           onPointerDown={() => {
             scrubbingRef.current = true;

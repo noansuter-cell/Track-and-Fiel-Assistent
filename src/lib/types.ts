@@ -10,6 +10,7 @@ export interface FramePose {
 /** Full cached analysis of a video, produced once and reused while scrubbing. */
 export interface PoseAnalysis {
   frames: FramePose[];
+  /** Effective average frames per second of the analysis (frames may be unevenly spaced). */
   sampleFps: number;
   durationSec: number;
   videoWidth: number;
