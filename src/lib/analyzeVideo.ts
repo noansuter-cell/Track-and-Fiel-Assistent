@@ -31,6 +31,9 @@ export interface AnalyzeProgress {
   frames: number;
 }
 
+/** Which stage the analysis is in — for honest loading UI. */
+export type AnalyzeStatus = "model" | "video" | "analyze";
+
 // The landmarker singleton runs in VIDEO mode, which requires timestamps to
 // increase monotonically across ALL calls — including across separate videos.
 let monotonicTimestampMs = 0;
@@ -52,14 +55,17 @@ export async function analyzeVideo(
   video: HTMLVideoElement,
   onProgress: (p: AnalyzeProgress) => void,
   signal?: AbortSignal,
+  onStatus?: (status: AnalyzeStatus) => void,
 ): Promise<PoseAnalysis> {
+  onStatus?.("model");
   const landmarker = await getPoseLandmarker();
+  onStatus?.("video");
   video.muted = true;
   video.playsInline = true;
 
   try {
     if (video.readyState < 1) {
-      await waitForEvent(video, "loadedmetadata", signal);
+      await waitForEvent(video, "loadedmetadata", signal, 20_000);
     }
     const durationSec = await resolveDuration(video, signal);
 
@@ -94,15 +100,17 @@ export async function analyzeVideo(
     // Warm up the model before playback starts: the very first inference
     // triggers GPU shader compilation, which can take several seconds on
     // phones — long enough for a short clip to play to its end unanalyzed.
-    await waitForFrameData(video, signal);
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    // A blank canvas is enough (no decoded video data needed — waiting for
+    // that can hang forever on iOS in low-power/data-saver situations).
+    ctx.fillStyle = "#808080";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
     monotonicTimestampMs += 40;
     landmarker.detectForVideo(canvas, monotonicTimestampMs);
     const steadyStart = performance.now();
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     monotonicTimestampMs += 40;
     landmarker.detectForVideo(canvas, monotonicTimestampMs);
     const steadyMs = performance.now() - steadyStart;
+    onStatus?.("analyze");
 
     let frames: FramePose[];
     if (typeof video.requestVideoFrameCallback === "function") {
@@ -246,14 +254,6 @@ function captureByPlayback(
   });
 }
 
-/** Wait until the video has decodable data for the current frame. */
-function waitForFrameData(
-  video: HTMLVideoElement,
-  signal?: AbortSignal,
-): Promise<void> {
-  if (video.readyState >= 2) return Promise.resolve();
-  return waitForEvent(video, "loadeddata", signal);
-}
 
 /** Fallback for browsers without requestVideoFrameCallback: seek-based sampling. */
 async function captureBySeeking(
@@ -316,13 +316,25 @@ function waitForEvent(
   target: EventTarget,
   event: string,
   signal?: AbortSignal,
+  timeoutMs?: number,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new DOMException("Abgebrochen", "AbortError"));
       return;
     }
+    const timer = timeoutMs
+      ? setTimeout(() => {
+          cleanup();
+          reject(
+            new Error(
+              "Das Video lädt nicht. Bitte erneut versuchen oder ein anderes Video wählen.",
+            ),
+          );
+        }, timeoutMs)
+      : undefined;
     const cleanup = () => {
+      if (timer) clearTimeout(timer);
       target.removeEventListener(event, onEvent);
       target.removeEventListener("error", onError);
       signal?.removeEventListener("abort", onAbort);

@@ -1,7 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { analyzeVideo, resolveDuration, type AnalyzeProgress } from "@/lib/analyzeVideo";
+import {
+  analyzeVideo,
+  resolveDuration,
+  type AnalyzeProgress,
+  type AnalyzeStatus,
+} from "@/lib/analyzeVideo";
 import {
   addRecord,
   getDefaultHeightCm,
@@ -45,6 +50,7 @@ export default function VideoAnalysis({
   onBack,
 }: Props) {
   const [phase, setPhase] = useState<Phase>("analyzing");
+  const [status, setStatus] = useState<AnalyzeStatus>("model");
   const [progress, setProgress] = useState<AnalyzeProgress | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const [analysis, setAnalysis] = useState<PoseAnalysis | null>(null);
@@ -83,7 +89,8 @@ export default function VideoAnalysis({
     setSelectedJoint(null);
     setSelectedMeasure(null);
     savedRef.current = false;
-    analyzeVideo(video, setProgress, controller.signal)
+    setStatus("model");
+    analyzeVideo(video, setProgress, controller.signal, setStatus)
       .then((result) => {
         setAnalysis(result);
         setPhase("ready");
@@ -402,7 +409,13 @@ export default function VideoAnalysis({
             objectFit: "contain",
           }}
         />
-        <p>{progress ? "Analysiere Video…" : "Lade Pose-Modell…"}</p>
+        <p>
+          {status === "model"
+            ? "Lade Pose-Modell… (beim ersten Mal ~14 MB, danach im Cache)"
+            : status === "video"
+              ? "Bereite Video vor…"
+              : "Analysiere Video…"}
+        </p>
         <div
           style={{
             width: 280,
