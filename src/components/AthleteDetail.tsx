@@ -1,11 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import {
-  listRecords,
-  summarizeWeaknesses,
-  type Athlete,
-} from "@/lib/athletes";
+import { listRecords, summarizeWeaknesses, type Athlete } from "@/lib/athletes";
 import { MODE_LABELS, scoreColor, type Mode } from "@/lib/metrics";
 
 interface Props {
@@ -21,26 +17,34 @@ export default function AthleteDetail({ athlete, onStart, onBack }: Props) {
 
   return (
     <main
+      className="fade-in"
       style={{
         minHeight: "100dvh",
         display: "flex",
         flexDirection: "column",
-        gap: 18,
-        padding: 24,
-        maxWidth: 520,
+        gap: 20,
+        padding: "max(24px, env(safe-area-inset-top)) 20px 32px",
+        maxWidth: 640,
         margin: "0 auto",
       }}
     >
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <button onClick={onBack}>‹ Athleten</button>
-        <span style={{ color: "#9aa0a6", fontSize: 13 }}>
-          {athlete.heightCm ? `${athlete.heightCm} cm` : "Grösse fehlt"}
+        <button className="ghost-btn" onClick={onBack}>‹ Athleten</button>
+        <span className="num" style={{ color: "var(--text-3)", fontSize: 13 }}>
+          {athlete.heightCm ? `${athlete.heightCm} cm` : ""}
         </span>
       </div>
-      <h1 style={{ fontSize: 24 }}>🏃 {athlete.name}</h1>
+
+      <header>
+        <h1 style={{ fontSize: 28, fontWeight: 700 }}>{athlete.name}</h1>
+        <p style={{ color: "var(--text-2)", fontSize: 14 }}>
+          {records.length === 0
+            ? "Noch keine Analysen"
+            : `${records.length} ${records.length === 1 ? "Analyse" : "Analysen"}`}
+        </p>
+      </header>
 
       <section style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        <h2 style={{ fontSize: 15, color: "#c6cad2" }}>Neue Analyse</h2>
         <div style={{ display: "flex", gap: 8 }}>
           {(Object.keys(MODE_LABELS) as Mode[]).map((m) => (
             <button
@@ -64,84 +68,58 @@ export default function AthleteDetail({ athlete, onStart, onBack }: Props) {
       </section>
 
       {weaknesses.length > 0 && (
-        <section style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <h2 style={{ fontSize: 15, color: "#c6cad2" }}>
-            Arbeitsschwerpunkte (aus {records.length}{" "}
-            {records.length === 1 ? "Analyse" : "Analysen"})
-          </h2>
-          {weaknesses.slice(0, 3).map((w) => (
-            <div
-              key={w.joint}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-                background: "#1a1d24",
-                border: "1px solid #2a2f3a",
-                borderRadius: 8,
-                padding: "10px 12px",
-                fontSize: 14,
-              }}
-            >
-              <span
-                style={{
-                  width: 12,
-                  height: 12,
-                  borderRadius: "50%",
-                  backgroundColor: scoreColor(w.avgScore),
-                  flexShrink: 0,
-                }}
-              />
-              <span style={{ flex: 1 }}>{w.label}</span>
-              <span style={{ color: "#9aa0a6", fontVariantNumeric: "tabular-nums" }}>
-                Ø {w.avgScore.toFixed(0)}
-                {w.trendDelta !== null && (
-                  <span
-                    style={{
-                      marginLeft: 6,
-                      color:
-                        w.trendDelta > 2
-                          ? "#22c55e"
-                          : w.trendDelta < -2
-                            ? "#ef4444"
-                            : "#9aa0a6",
-                    }}
-                  >
-                    {w.trendDelta > 2 ? "↗" : w.trendDelta < -2 ? "↘" : "→"}
-                  </span>
-                )}
-              </span>
+        <section className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <h2 style={{ fontSize: 15, fontWeight: 600 }}>Technik-Profil</h2>
+          {weaknesses.map((w) => (
+            <div key={w.joint} style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+                <span>{w.label}</span>
+                <span className="num" style={{ color: "var(--text-2)" }}>
+                  {w.avgScore.toFixed(0)}
+                  {w.trendDelta !== null && (
+                    <span
+                      style={{
+                        marginLeft: 6,
+                        color:
+                          w.trendDelta > 2
+                            ? "#22c55e"
+                            : w.trendDelta < -2
+                              ? "#ef4444"
+                              : "var(--text-3)",
+                      }}
+                    >
+                      {w.trendDelta > 2 ? "↗" : w.trendDelta < -2 ? "↘" : "→"}
+                    </span>
+                  )}
+                </span>
+              </div>
+              <div className="meter">
+                <div
+                  style={{ width: `${w.avgScore}%`, background: scoreColor(w.avgScore) }}
+                />
+              </div>
             </div>
           ))}
+          <p style={{ color: "var(--text-3)", fontSize: 12 }}>
+            Durchschnitt über alle Analysen · Pfeil = Entwicklung seit den ersten
+            Aufnahmen
+          </p>
         </section>
       )}
 
-      <section style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        <h2 style={{ fontSize: 15, color: "#c6cad2" }}>Verlauf</h2>
+      <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <h2 style={{ fontSize: 15, color: "var(--text-2)", fontWeight: 600 }}>Verlauf</h2>
         {records.length === 0 && (
-          <p style={{ color: "#9aa0a6", fontSize: 14 }}>
-            Noch keine Analysen. Nimm die erste Übung auf – die Auswertung wird
-            hier automatisch gespeichert.
-          </p>
+          <div className="card" style={{ color: "var(--text-2)", fontSize: 14 }}>
+            Nimm die erste Übung auf — die Auswertung wird hier automatisch
+            gespeichert und der Fortschritt sichtbar.
+          </div>
         )}
         {[...records].reverse().map((r) => (
-          <div
-            key={r.id}
-            style={{
-              background: "#1a1d24",
-              border: "1px solid #2a2f3a",
-              borderRadius: 8,
-              padding: "10px 12px",
-              fontSize: 13,
-              color: "#c6cad2",
-              display: "flex",
-              flexDirection: "column",
-              gap: 2,
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between" }}>
+          <div key={r.id} className="card" style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14 }}>
               <strong>{MODE_LABELS[r.mode]}</strong>
-              <span style={{ color: "#9aa0a6" }}>
+              <span className="num" style={{ color: "var(--text-3)", fontSize: 13 }}>
                 {new Date(r.dateISO).toLocaleDateString("de-CH", {
                   day: "2-digit",
                   month: "2-digit",
@@ -151,21 +129,17 @@ export default function AthleteDetail({ athlete, onStart, onBack }: Props) {
                 })}
               </span>
             </div>
-            <span style={{ color: "#9aa0a6" }}>
+            <span className="num" style={{ color: "var(--text-2)", fontSize: 13 }}>
               {[
-                r.cadenceStepsPerSec !== null
-                  ? `Kadenz ${r.cadenceStepsPerSec.toFixed(1)}/s`
-                  : null,
+                r.cadenceStepsPerSec !== null ? `Kadenz ${r.cadenceStepsPerSec.toFixed(1)}/s` : null,
                 r.stepLengthsM.length > 0
-                  ? `Ø Schritt ${(
-                      r.stepLengthsM.reduce((a, b) => a + b, 0) / r.stepLengthsM.length
-                    ).toFixed(2)} m`
+                  ? `Ø Schritt ${(r.stepLengthsM.reduce((a, b) => a + b, 0) / r.stepLengthsM.length).toFixed(2)} m`
                   : null,
                 r.flightHeightM !== null ? `Flughöhe ${r.flightHeightM.toFixed(2)} m` : null,
                 r.takeoffAngleDeg !== null ? `Absprung ${r.takeoffAngleDeg.toFixed(0)}°` : null,
               ]
                 .filter(Boolean)
-                .join(" · ") || "—"}
+                .join(" · ") || "Keine Messwerte"}
             </span>
           </div>
         ))}

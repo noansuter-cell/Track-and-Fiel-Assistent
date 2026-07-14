@@ -70,6 +70,10 @@ export function newAthlete(name: string, heightCm: number | null): Athlete {
   };
 }
 
+export function listAllRecords(): SessionRecord[] {
+  return allRecords().sort((a, b) => b.dateISO.localeCompare(a.dateISO));
+}
+
 function allRecords(): SessionRecord[] {
   return read<SessionRecord[]>(RECORDS_KEY, []);
 }

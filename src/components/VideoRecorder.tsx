@@ -114,24 +114,24 @@ export default function VideoRecorder({ onRecorded, onCancel }: Props) {
   };
 
   return (
-    <main
-      style={{
-        minHeight: "100dvh",
-        display: "flex",
-        flexDirection: "column",
-        gap: 12,
-        padding: 16,
-      }}
-    >
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <button onClick={onCancel}>‹ Zurück</button>
-        <span style={{ fontVariantNumeric: "tabular-nums" }}>
-          {recording ? `● REC ${elapsedSec}s` : "Bereit"}
-        </span>
-      </div>
-
+    <div style={{ position: "fixed", inset: 0, background: "#000" }}>
       {error ? (
-        <p style={{ color: "#f28b82", padding: 16 }}>{error}</p>
+        <div
+          className="glass"
+          style={{
+            position: "absolute",
+            left: "50%",
+            top: "50%",
+            transform: "translate(-50%, -50%)",
+            borderRadius: 20,
+            padding: 22,
+            width: "min(88vw, 380px)",
+            textAlign: "center",
+          }}
+        >
+          <p style={{ color: "#f28b82", marginBottom: 14 }}>{error}</p>
+          <button className="primary" onClick={onCancel}>Zurück</button>
+        </div>
       ) : (
         <video
           ref={previewRef}
@@ -139,34 +139,79 @@ export default function VideoRecorder({ onRecorded, onCancel }: Props) {
           playsInline
           autoPlay
           style={{
+            position: "absolute",
+            inset: 0,
             width: "100%",
-            maxHeight: "70dvh",
-            background: "#000",
-            borderRadius: 8,
+            height: "100%",
             objectFit: "contain",
           }}
         />
       )}
 
-      <div style={{ display: "flex", justifyContent: "center", padding: 8 }}>
-        {recording ? (
-          <button className="danger" style={{ width: 240 }} onClick={stopRecording}>
-            ⏹ Aufnahme stoppen
-          </button>
-        ) : (
+      <div
+        style={{
+          position: "absolute",
+          top: "max(14px, env(safe-area-inset-top))",
+          left: 14,
+          right: 14,
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+        }}
+      >
+        <button className="glass chip" onClick={onCancel}>‹ Zurück</button>
+        <span
+          className="glass chip num"
+          style={{ color: recording ? "#ff6369" : "var(--text-2)" }}
+        >
+          {recording ? `● REC ${elapsedSec}s` : "Bereit"}
+        </span>
+      </div>
+
+      <div
+        style={{
+          position: "absolute",
+          left: 0,
+          right: 0,
+          bottom: "max(24px, env(safe-area-inset-bottom))",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: 12,
+        }}
+      >
+        {!error && (
           <button
-            className="primary"
-            style={{ width: 240 }}
-            onClick={startRecording}
-            disabled={!!error}
+            onClick={recording ? stopRecording : startRecording}
+            aria-label={recording ? "Aufnahme stoppen" : "Aufnahme starten"}
+            style={{
+              width: 74,
+              height: 74,
+              borderRadius: "50%",
+              border: "4px solid rgba(255,255,255,0.85)",
+              background: "transparent",
+              padding: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
           >
-            ⏺ Aufnahme starten
+            <span
+              style={{
+                display: "block",
+                width: recording ? 28 : 56,
+                height: recording ? 28 : 56,
+                borderRadius: recording ? 8 : "50%",
+                background: "#e5484d",
+                transition: "all 200ms cubic-bezier(0.32, 0.72, 0, 1)",
+              }}
+            />
           </button>
         )}
+        <p className="glass chip" style={{ color: "var(--text-2)", fontSize: 12 }}>
+          Seitlich filmen · ganzer Körper im Bild · ruhig halten
+        </p>
       </div>
-      <p style={{ color: "#5f6368", fontSize: 12, textAlign: "center" }}>
-        Tipp: seitlich filmen, ganzer Körper im Bild, Handy ruhig halten.
-      </p>
-    </main>
+    </div>
   );
 }

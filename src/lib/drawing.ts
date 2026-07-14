@@ -126,11 +126,34 @@ export function drawTape(ctx: CanvasRenderingContext2D, tape: TapeMeasure): void
   ctx.restore();
 }
 
+/** Ghost skeleton (ideal execution) drawn beneath the athlete's skeleton. */
+export function drawGhost(
+  ctx: CanvasRenderingContext2D,
+  segments: { x1: number; y1: number; x2: number; y2: number }[],
+): void {
+  const { width, height } = ctx.canvas;
+  const scale = Math.max(width, height) / 640;
+  ctx.save();
+  ctx.lineWidth = 5 * scale;
+  ctx.lineCap = "round";
+  ctx.strokeStyle = "rgba(56, 189, 248, 0.45)";
+  ctx.shadowColor = "rgba(56, 189, 248, 0.5)";
+  ctx.shadowBlur = 8 * scale;
+  ctx.beginPath();
+  for (const s of segments) {
+    ctx.moveTo(s.x1 * width, s.y1 * height);
+    ctx.lineTo(s.x2 * width, s.y2 * height);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
 /** Draw the skeleton for one frame. Canvas pixel size must match the video frame size. */
 export function drawSkeleton(
   ctx: CanvasRenderingContext2D,
   landmarks: NormalizedLandmark[] | null,
   markers: JointMarker[] = [],
+  nowMs = 0,
 ): void {
   const { width, height } = ctx.canvas;
   ctx.clearRect(0, 0, width, height);
@@ -163,21 +186,27 @@ export function drawSkeleton(
     ctx.fill();
   }
 
+  // Subtle shimmer: markers breathe slowly so they read as live, tappable points.
+  const pulse = 0.5 + 0.5 * Math.sin(nowMs / 450);
   for (const marker of markers) {
     const lm = landmarks[marker.landmarkIndex];
     if (!isDrawable(lm)) continue;
     const x = lm.x * width;
     const y = lm.y * height;
+    ctx.save();
+    ctx.shadowColor = marker.color;
+    ctx.shadowBlur = (5 + 6 * pulse) * scale;
     ctx.beginPath();
-    ctx.arc(x, y, 6 * scale, 0, Math.PI * 2);
+    ctx.arc(x, y, (5.6 + 0.9 * pulse) * scale, 0, Math.PI * 2);
     ctx.fillStyle = marker.color;
     ctx.fill();
+    ctx.restore();
     ctx.lineWidth = 1.5 * scale;
-    ctx.strokeStyle = "rgba(0,0,0,0.5)";
+    ctx.strokeStyle = "rgba(0,0,0,0.45)";
     ctx.stroke();
     if (marker.selected) {
       ctx.beginPath();
-      ctx.arc(x, y, 9.5 * scale, 0, Math.PI * 2);
+      ctx.arc(x, y, 10 * scale, 0, Math.PI * 2);
       ctx.lineWidth = 2.5 * scale;
       ctx.strokeStyle = "#ffffff";
       ctx.stroke();

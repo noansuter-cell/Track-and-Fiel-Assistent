@@ -87,6 +87,10 @@ export interface Metrics {
   events: MetricEvent[];
   steps: StepMeasure[];
   jump: JumpMeasure | null;
+  /** Ground contacts in time order (drives the ghost-skeleton stride phase). */
+  contacts: { timeSec: number; side: "links" | "rechts" }[];
+  /** Horizontal running direction in image space: 1 = to the right. */
+  direction: 1 | -1;
   cadenceStepsPerSec: number | null;
   meanTorsoLeanDeg: number | null;
   /**
@@ -529,6 +533,8 @@ export function computeMetrics(analysis: PoseAnalysis, mode: Mode): Metrics {
     events: sortedEvents,
     steps,
     jump,
+    contacts: contacts.map((c) => ({ timeSec: c.timeSec, side: c.side })),
+    direction: direction as 1 | -1,
     cadenceStepsPerSec,
     meanTorsoLeanDeg,
     segmentChainPx: median(segChainPxSamples),
