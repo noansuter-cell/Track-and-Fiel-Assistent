@@ -126,25 +126,36 @@ export function drawTape(ctx: CanvasRenderingContext2D, tape: TapeMeasure): void
   ctx.restore();
 }
 
-/** Ghost skeleton (ideal execution) drawn beneath the athlete's skeleton. */
+/** Ghost skeleton (ideal execution) overlaid for direct comparison. */
 export function drawGhost(
   ctx: CanvasRenderingContext2D,
   segments: { x1: number; y1: number; x2: number; y2: number }[],
+  alpha = 1,
 ): void {
   const { width, height } = ctx.canvas;
   const scale = Math.max(width, height) / 640;
   ctx.save();
+  ctx.globalAlpha = alpha;
   ctx.lineWidth = 5 * scale;
   ctx.lineCap = "round";
-  ctx.strokeStyle = "rgba(56, 189, 248, 0.45)";
-  ctx.shadowColor = "rgba(56, 189, 248, 0.5)";
-  ctx.shadowBlur = 8 * scale;
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = "rgba(56, 189, 248, 0.5)";
+  ctx.shadowColor = "rgba(56, 189, 248, 0.55)";
+  ctx.shadowBlur = 10 * scale;
   ctx.beginPath();
   for (const s of segments) {
     ctx.moveTo(s.x1 * width, s.y1 * height);
     ctx.lineTo(s.x2 * width, s.y2 * height);
   }
   ctx.stroke();
+  // Joint dots make the figure read as a body, not a scribble.
+  ctx.fillStyle = "rgba(165, 224, 251, 0.75)";
+  ctx.shadowBlur = 6 * scale;
+  for (const s of segments) {
+    ctx.beginPath();
+    ctx.arc(s.x2 * width, s.y2 * height, 2.6 * scale, 0, Math.PI * 2);
+    ctx.fill();
+  }
   ctx.restore();
 }
 

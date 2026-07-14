@@ -164,7 +164,8 @@ export default function VideoRecorder({ onRecorded, onCancel }: Props) {
           className="glass chip num"
           style={{ color: recording ? "#ff6369" : "var(--text-2)" }}
         >
-          {recording ? `● REC ${elapsedSec}s` : "Bereit"}
+          {recording && <span className="rec-dot" />}
+          {recording ? `REC ${elapsedSec}s` : "Bereit"}
         </span>
       </div>
 

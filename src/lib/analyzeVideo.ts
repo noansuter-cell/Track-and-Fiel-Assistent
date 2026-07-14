@@ -86,8 +86,12 @@ export async function analyzeVideo(
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("Canvas-Kontext nicht verfügbar.");
 
+    let thumbnail: string | null = null;
     const detectFrame = (timeSec: number, frames: FramePose[]) => {
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      if (!thumbnail && timeSec >= totalSec * 0.35) {
+        thumbnail = captureThumbnail(canvas);
+      }
       monotonicTimestampMs += 40;
       const result = landmarker.detectForVideo(canvas, monotonicTimestampMs);
       frames.push({
@@ -155,6 +159,7 @@ export async function analyzeVideo(
       durationSec: totalSec,
       videoWidth: video.videoWidth,
       videoHeight: video.videoHeight,
+      thumbnail,
     };
   } finally {
     video.pause();
@@ -162,6 +167,21 @@ export async function analyzeVideo(
 }
 
 class PlaybackBlockedError extends Error {}
+
+/** Tiny JPEG for history cards (kept small — it lands in localStorage). */
+function captureThumbnail(source: HTMLCanvasElement): string | null {
+  try {
+    const w = 200;
+    const h = Math.round((source.height / source.width) * w);
+    const c = document.createElement("canvas");
+    c.width = w;
+    c.height = h;
+    c.getContext("2d")?.drawImage(source, 0, 0, w, h);
+    return c.toDataURL("image/jpeg", 0.6);
+  } catch {
+    return null;
+  }
+}
 
 /** Merge two capture passes, sorted by time, dropping near-duplicates. */
 function mergeFrames(a: FramePose[], b: FramePose[]): FramePose[] {

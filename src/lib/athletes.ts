@@ -21,6 +21,8 @@ export interface SessionRecord {
   stepLengthsM: number[];
   flightHeightM: number | null;
   takeoffAngleDeg: number | null;
+  /** Small JPEG data URL from the analyzed video. */
+  thumbnail?: string | null;
 }
 
 const ATHLETES_KEY = "trackcoach.athletes.v1";

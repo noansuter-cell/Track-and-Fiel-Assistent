@@ -108,7 +108,8 @@ function poseAtPhase(phase: number): KeyPose {
       break;
     }
   }
-  const t = b.phase === a.phase ? 0 : (p - a.phase) / (b.phase - a.phase);
+  const raw = b.phase === a.phase ? 0 : (p - a.phase) / (b.phase - a.phase);
+  const t = raw * raw * (3 - 2 * raw); // smoothstep between key poses
   return {
     support: lerpLimb(a.pose.support, b.pose.support, t),
     swing: lerpLimb(a.pose.swing, b.pose.swing, t),
@@ -118,39 +119,103 @@ function poseAtPhase(phase: number): KeyPose {
   };
 }
 
+export interface GhostResult {
+  segments: GhostSegment[];
+  /** 0–1 fade so the ghost eases in/out at the edges of the stride data. */
+  alpha: number;
+}
+
+/** Contacts must alternate sides for a continuous stride cycle; drop doubles. */
+function cleanContacts(
+  contacts: Metrics["contacts"],
+): Metrics["contacts"] {
+  const out: Metrics["contacts"] = [];
+  for (const c of contacts) {
+    if (out.length === 0 || out[out.length - 1].side !== c.side) out.push(c);
+  }
+  return out;
+}
+
+/** Hip midpoint averaged over a small time window — a calm anchor. */
+function smoothedHip(
+  analysis: PoseAnalysis,
+  timeSec: number,
+): { x: number; y: number } | null {
+  let sx = 0;
+  let sy = 0;
+  let count = 0;
+  for (const f of analysis.frames) {
+    if (Math.abs(f.timeSec - timeSec) > 0.14 || !f.landmarks) continue;
+    const l = f.landmarks[LM.LEFT_HIP];
+    const r = f.landmarks[LM.RIGHT_HIP];
+    if (!l || !r) continue;
+    sx += (l.x + r.x) / 2;
+    sy += (l.y + r.y) / 2;
+    count++;
+  }
+  if (count === 0) {
+    const lm = landmarksAt(analysis, timeSec);
+    const l = lm?.[LM.LEFT_HIP];
+    const r = lm?.[LM.RIGHT_HIP];
+    if (!l || !r) return null;
+    return { x: (l.x + r.x) / 2, y: (l.y + r.y) / 2 };
+  }
+  return { x: sx / count, y: sy / count };
+}
+
 /**
- * Ghost segments (normalized coordinates) at a moment in time, or null when
+ * Ghost skeleton (normalized coordinates) at a moment in time, or null when
  * the moment is outside the detected stride cycle (sprint mode only).
  */
 export function ghostSegmentsAt(
   analysis: PoseAnalysis,
   metrics: Metrics,
   timeSec: number,
-): GhostSegment[] | null {
-  if (metrics.mode !== "sprint" || metrics.contacts.length < 2) return null;
-  const contacts = metrics.contacts;
-  let intervalIndex = -1;
+): GhostResult | null {
+  if (metrics.mode !== "sprint") return null;
+  const contacts = cleanContacts(metrics.contacts);
+  if (contacts.length < 2) return null;
+
+  const first = contacts[0].timeSec;
+  const last = contacts[contacts.length - 1].timeSec;
+  if (timeSec < first || timeSec > last) return null;
+
+  // Median stride span keeps the phase stable even when single contacts
+  // are detected slightly early or late.
+  const spans = [];
+  for (let i = 0; i + 1 < contacts.length; i++) {
+    spans.push(contacts[i + 1].timeSec - contacts[i].timeSec);
+  }
+  spans.sort((a, b) => a - b);
+  const medianSpan = spans[Math.floor(spans.length / 2)];
+  if (!medianSpan || medianSpan <= 0 || medianSpan > 1) return null;
+
+  let intervalIndex = 0;
   for (let i = 0; i + 1 < contacts.length; i++) {
     if (timeSec >= contacts[i].timeSec && timeSec <= contacts[i + 1].timeSec) {
       intervalIndex = i;
       break;
     }
   }
-  if (intervalIndex < 0) return null;
   const from = contacts[intervalIndex];
   const to = contacts[intervalIndex + 1];
-  const span = to.timeSec - from.timeSec;
-  if (span <= 0 || span > 1) return null;
-  const phase = (timeSec - from.timeSec) / span;
+  const actualSpan = to.timeSec - from.timeSec;
+  // Damp outlier spans toward the median so the ghost never sprints or crawls.
+  const expectedSpan = Math.min(Math.max(actualSpan, medianSpan * 0.6), medianSpan * 1.6);
+  const phase = Math.min(1, (timeSec - from.timeSec) / expectedSpan);
 
-  // Anchor at the athlete's current hip midpoint, scale from calibration.
-  const landmarks = landmarksAt(analysis, timeSec);
-  if (!landmarks || !metrics.segmentChainPx) return null;
-  const lHip = landmarks[LM.LEFT_HIP];
-  const rHip = landmarks[LM.RIGHT_HIP];
-  if (!lHip || !rHip) return null;
-  const hipX = (lHip.x + rHip.x) / 2;
-  const hipY = (lHip.y + rHip.y) / 2;
+  // Fade in after the first contact and out before the last one.
+  const fade = 0.18;
+  const alpha = Math.min(
+    1,
+    Math.max(0, (timeSec - first) / fade),
+    Math.max(0, (last - timeSec) / fade),
+  );
+
+  const hip = smoothedHip(analysis, timeSec);
+  if (!hip || !metrics.segmentChainPx) return null;
+  const hipX = hip.x;
+  const hipY = hip.y;
 
   const W = analysis.videoWidth;
   const H = analysis.videoHeight;
@@ -210,7 +275,7 @@ export function ghostSegmentsAt(
   const armA = arm(pose.armSupportSide);
   const armB = arm(pose.armSwingSide);
 
-  const hip = pt(0, 0);
+  const hipPt = pt(0, 0);
   const shoulder = pt(shoulderDx, shoulderDy);
   const head = pt(headDx, headDy);
 
@@ -219,16 +284,19 @@ export function ghostSegmentsAt(
     b: { x: number; y: number },
   ): GhostSegment => ({ x1: a.x, y1: a.y, x2: b.x, y2: b.y });
 
-  return [
-    seg(hip, shoulder),
-    seg(shoulder, head),
-    seg(supportLeg.origin, supportLeg.mid),
-    seg(supportLeg.mid, supportLeg.end),
-    seg(swingLeg.origin, swingLeg.mid),
-    seg(swingLeg.mid, swingLeg.end),
-    seg(armA.shoulder, armA.elbow),
-    seg(armA.elbow, armA.wrist),
-    seg(armB.shoulder, armB.elbow),
-    seg(armB.elbow, armB.wrist),
-  ];
+  return {
+    alpha,
+    segments: [
+      seg(hipPt, shoulder),
+      seg(shoulder, head),
+      seg(supportLeg.origin, supportLeg.mid),
+      seg(supportLeg.mid, supportLeg.end),
+      seg(swingLeg.origin, swingLeg.mid),
+      seg(swingLeg.mid, swingLeg.end),
+      seg(armA.shoulder, armA.elbow),
+      seg(armA.elbow, armA.wrist),
+      seg(armB.shoulder, armB.elbow),
+      seg(armB.elbow, armB.wrist),
+    ],
+  };
 }

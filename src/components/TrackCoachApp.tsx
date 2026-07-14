@@ -11,6 +11,7 @@ import {
 import { MODE_LABELS, type Mode } from "@/lib/metrics";
 import { getPoseLandmarker } from "@/lib/pose";
 import AthleteDetail from "./AthleteDetail";
+import Avatar from "./Avatar";
 import VideoAnalysis from "./VideoAnalysis";
 import VideoRecorder from "./VideoRecorder";
 
@@ -220,6 +221,28 @@ export default function TrackCoachApp() {
   );
 }
 
+function ContourPattern() {
+  // Topographic contour lines echoing running-track maps.
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 400 200"
+      preserveAspectRatio="none"
+      style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0.5 }}
+    >
+      {[0, 1, 2, 3, 4].map((i) => (
+        <path
+          key={i}
+          d={`M -20 ${150 - i * 22} C 90 ${100 - i * 16}, 170 ${190 - i * 24}, 290 ${120 - i * 18} S 420 ${140 - i * 20}, 440 ${90 - i * 14}`}
+          fill="none"
+          stroke="rgba(226, 255, 122, 0.12)"
+          strokeWidth="1.2"
+        />
+      ))}
+    </svg>
+  );
+}
+
 function HomeTab({
   athletes,
   onTrack,
@@ -231,50 +254,76 @@ function HomeTab({
 }) {
   const records = listAllRecords();
   const nameOf = (id: string) => athletes.find((a) => a.id === id)?.name ?? "Schnellanalyse";
+  const today = new Date().toLocaleDateString("de-CH", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+  });
   return (
     <>
-      <header>
-        <p style={{ color: "var(--text-2)", fontSize: 14 }}>Willkommen zurück</p>
-        <h1 style={{ fontSize: 30, fontWeight: 700 }}>TrackCoach</h1>
-      </header>
-
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-        <div className="card">
-          <p className="num" style={{ fontSize: 28, fontWeight: 700 }}>{athletes.length}</p>
-          <p style={{ color: "var(--text-2)", fontSize: 13 }}>Athleten</p>
-        </div>
-        <div className="card">
-          <p className="num" style={{ fontSize: 28, fontWeight: 700 }}>{records.length}</p>
-          <p style={{ color: "var(--text-2)", fontSize: 13 }}>Analysen</p>
+      <div className="hero rise" style={{ ["--i" as never]: 0 }}>
+        <ContourPattern />
+        <div style={{ position: "relative" }}>
+          <p style={{ color: "var(--text-2)", fontSize: 13, marginBottom: 2 }}>{today}</p>
+          <h1 style={{ fontSize: 30, fontWeight: 750, marginBottom: 14 }}>TrackCoach</h1>
+          <div style={{ display: "flex", gap: 18, marginBottom: 18 }}>
+            <div>
+              <p className="num" style={{ fontSize: 24, fontWeight: 700 }}>{athletes.length}</p>
+              <p style={{ color: "var(--text-2)", fontSize: 12 }}>Athleten</p>
+            </div>
+            <div>
+              <p className="num" style={{ fontSize: 24, fontWeight: 700 }}>{records.length}</p>
+              <p style={{ color: "var(--text-2)", fontSize: 12 }}>Analysen</p>
+            </div>
+            <div>
+              <p className="num" style={{ fontSize: 24, fontWeight: 700 }}>
+                {records.filter((r) => Date.now() - +new Date(r.dateISO) < 7 * 86400e3).length}
+              </p>
+              <p style={{ color: "var(--text-2)", fontSize: 12 }}>diese Woche</p>
+            </div>
+          </div>
+          <button className="primary" style={{ width: "100%", padding: 16, fontSize: 15 }} onClick={onTrack}>
+            Neue Analyse starten
+          </button>
         </div>
       </div>
 
-      <button className="primary" style={{ padding: 18, fontSize: 16 }} onClick={onTrack}>
-        Neue Analyse starten
-      </button>
-
       <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        <h2 style={{ fontSize: 16, color: "var(--text-2)", fontWeight: 600 }}>
+        <h2 style={{ fontSize: 15, color: "var(--text-2)", fontWeight: 600 }}>
           Letzte Analysen
         </h2>
         {records.length === 0 && (
-          <div className="card" style={{ color: "var(--text-2)", fontSize: 14 }}>
+          <div className="card rise" style={{ color: "var(--text-2)", fontSize: 14, ["--i" as never]: 1 }}>
             Noch keine Analysen. Starte über «Tracking» deine erste Aufnahme —
             die Auswertung landet automatisch hier.
           </div>
         )}
-        {records.slice(0, 5).map((r) => {
+        {records.slice(0, 5).map((r, i) => {
           const athlete = athletes.find((a) => a.id === r.athleteId);
           return (
             <button
               key={r.id}
-              className="card"
-              style={{ textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center" }}
+              className="card rise"
+              style={{
+                textAlign: "left",
+                display: "flex",
+                alignItems: "center",
+                gap: 12,
+                padding: 12,
+                ["--i" as never]: i + 1,
+              }}
               onClick={() => athlete && onOpenAthlete(athlete)}
             >
-              <span>
+              {r.thumbnail ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img className="thumb" src={r.thumbnail} alt="" />
+              ) : (
+                <Avatar name={nameOf(r.athleteId)} size={56} />
+              )}
+              <span style={{ flex: 1 }}>
                 <strong>{nameOf(r.athleteId)}</strong>
-                <span style={{ color: "var(--text-2)" }}> · {MODE_LABELS[r.mode]}</span>
+                <br />
+                <span style={{ color: "var(--text-2)", fontSize: 13 }}>{MODE_LABELS[r.mode]}</span>
               </span>
               <span className="num" style={{ color: "var(--text-3)", fontSize: 13 }}>
                 {new Date(r.dateISO).toLocaleDateString("de-CH", { day: "2-digit", month: "2-digit" })}
@@ -385,15 +434,23 @@ function AthletesTab({
         </div>
       )}
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {athletes.map((a) => (
+        {athletes.map((a, i) => (
           <button
             key={a.id}
-            className="card"
-            style={{ textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center" }}
+            className="card rise"
+            style={{
+              textAlign: "left",
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+              padding: 12,
+              ["--i" as never]: i,
+            }}
             onClick={() => onOpen(a)}
           >
-            <strong>{a.name}</strong>
-            <span style={{ color: "var(--text-3)", fontSize: 13 }}>
+            <Avatar name={a.name} />
+            <strong style={{ flex: 1 }}>{a.name}</strong>
+            <span className="num" style={{ color: "var(--text-3)", fontSize: 13 }}>
               {a.heightCm ? `${a.heightCm} cm · ` : ""}›
             </span>
           </button>

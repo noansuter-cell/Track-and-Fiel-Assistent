@@ -80,6 +80,10 @@ export default function VideoAnalysis({
   const selectedMeasureRef = useRef<SelectedMeasure>(null);
   const showGhostRef = useRef(false);
   const savedRef = useRef(false);
+  const smoothingRef = useRef<{
+    timeSec: number;
+    landmarks: { x: number; y: number }[];
+  } | null>(null);
   const feedbackRef = useRef<HTMLSpanElement>(null);
   const feedbackDotRef = useRef<HTMLSpanElement>(null);
 
@@ -145,6 +149,7 @@ export default function VideoAnalysis({
       stepLengthsM: mpp ? metrics.steps.map((s) => s.lengthPx * mpp) : [],
       flightHeightM: mpp && metrics.jump ? metrics.jump.flightHeightPx * mpp : null,
       takeoffAngleDeg: metrics.jump?.takeoffAngleDeg ?? null,
+      thumbnail: analysis?.thumbnail ?? null,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [metrics, athlete]);
@@ -192,11 +197,32 @@ export default function VideoAnalysis({
         }
       }
 
+      // Temporal smoothing: blend toward the new pose during playback so the
+      // overlay glides instead of jittering with per-frame detection noise.
+      let displayLandmarks = landmarks;
+      const prev = smoothingRef.current;
+      if (
+        landmarks &&
+        prev &&
+        prev.landmarks.length === landmarks.length &&
+        Math.abs(timeSec - prev.timeSec) < 0.15
+      ) {
+        const blend = 0.45;
+        displayLandmarks = landmarks.map((lm, i) => ({
+          ...lm,
+          x: prev.landmarks[i].x + (lm.x - prev.landmarks[i].x) * blend,
+          y: prev.landmarks[i].y + (lm.y - prev.landmarks[i].y) * blend,
+        }));
+      }
+      smoothingRef.current = displayLandmarks
+        ? { timeSec, landmarks: displayLandmarks }
+        : null;
+
       // Clear happens inside drawSkeleton; ghost must be drawn after it.
-      drawSkeleton(ctx, landmarks, markers, performance.now());
+      drawSkeleton(ctx, displayLandmarks, markers, performance.now());
       if (showGhostRef.current) {
-        const segments = ghostSegmentsAt(analysis, metrics, timeSec);
-        if (segments) drawGhost(ctx, segments);
+        const ghost = ghostSegmentsAt(analysis, metrics, timeSec);
+        if (ghost) drawGhost(ctx, ghost.segments, ghost.alpha);
       }
       const tape = buildTape(selectedMeasureRef.current);
       if (tape) drawTape(ctx, tape);

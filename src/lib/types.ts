@@ -15,6 +15,8 @@ export interface PoseAnalysis {
   durationSec: number;
   videoWidth: number;
   videoHeight: number;
+  /** Small JPEG data URL captured mid-video (for history cards). */
+  thumbnail: string | null;
 }
 
 /** BlazePose landmark indices used across the app. */
